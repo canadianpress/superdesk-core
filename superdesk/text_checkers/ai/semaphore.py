@@ -38,28 +38,28 @@ class Semaphore(AIServiceBase):
     def __init__(self,data):
 
 
-		#  SEMAPHORE_BASE_URL OR TOKEN_ENDPOINT Goes Here
-		self.base_url =  os.getenv('SEMAPHORE_BASE_URL')
+	#  SEMAPHORE_BASE_URL OR TOKEN_ENDPOINT Goes Here
+     	self.base_url =  os.getenv('SEMAPHORE_BASE_URL')
 
-		#  SEMAPHORE_ANALYZE_URL Goes Here
+	#  SEMAPHORE_ANALYZE_URL Goes Here
         self.analyze_url = os.getenv(' SEMAPHORE_ANALYZE_URL')
 
-		#  SEMAPHORE_API_KEY Goes Here
+	#  SEMAPHORE_API_KEY Goes Here
         self.api_key = os.getenv('SEMAPHORE_API_KEY')
 
-		#  SEMAPHORE_SEARCH_URL Goes Here
+	#  SEMAPHORE_SEARCH_URL Goes Here
         self.search_url = os.getenv('SEMAPHORE_SEARCH_URL')
 
-		#  SEMAPHORE_GET_PARENT_URL Goes Here
+	#  SEMAPHORE_GET_PARENT_URL Goes Here
         self.get_parent_url = os.getenv('SEMAPHORE_GET_PARENT_URL')
     
-		#  SEMAPHORE_CREATE_TAG_URL Goes Here
+	#  SEMAPHORE_CREATE_TAG_URL Goes Here
         self.create_tag_url = os.getenv('SEMAPHORE_CREATE_TAG_URL')
 
-		#  SEMAPHORE_CREATE_TAG_TASK Goes Here
+	#  SEMAPHORE_CREATE_TAG_TASK Goes Here
         self.create_tag_task = os.getenv('SEMAPHORE_CREATE_TAG_TASK')
 
-		#  SEMAPHORE_CREATE_TAG_QUERY Goes Here
+	#  SEMAPHORE_CREATE_TAG_QUERY Goes Here
         self.create_tag_query = os.getenv('SEMAPHORE_CREATE_TAG_QUERY')
 
         
@@ -627,7 +627,7 @@ class Semaphore(AIServiceBase):
         slugline = html_content['slugline']
        
 
-				# Embed the 'body_html' into the XML template		
+	# Embed the 'body_html' into the XML template		
         xml_output = xml_template.format(headline,headline_extended,body_html,slugline)
         xml_output = clean_html_content(xml_output)
             
