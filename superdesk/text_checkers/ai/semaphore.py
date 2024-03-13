@@ -9,6 +9,7 @@ import traceback
 import io
 import superdesk
 import json
+from typing import Dict, List
 
 
 logger = logging.getLogger(__name__)
@@ -21,8 +22,7 @@ class Semaphore(AIServiceBase):
     """Semaphore autotagging service
 
     Environment variables SEMAPHORE_BASE_URL, SEMAPHORE_ANALYZE_URL, SEMAPHORE_SEARCH_URL, SEMAPHORE_GET_PARENT_URL,
-    SEMAPHORE_CREATE_TAG_URL, SEMAPHORE_CREATE_TAG_TASK, SEMAPHORE_CREATE_TAG_QUERY, SEMAPHORE_API_KEY
-    and INDEX_FILE_PATH must be set.
+    SEMAPHORE_CREATE_TAG_URL, SEMAPHORE_CREATE_TAG_TASK, SEMAPHORE_CREATE_TAG_QUERY, SEMAPHORE_API_KEY.
     """
 
     name = "semaphore"
@@ -31,31 +31,28 @@ class Semaphore(AIServiceBase):
 
     def __init__(self, data):
         # SEMAPHORE_BASE_URL OR TOKEN_ENDPOINT Goes Here
-        self.base_url = os.getenv("SEMAPHORE_BASE_URL")
+        self.base_url = "https://ca.cloud.smartlogic.com/token"
 
         #  SEMAPHORE_ANALYZE_URL Goes Here
-        self.analyze_url = os.getenv(" SEMAPHORE_ANALYZE_URL")
+        self.analyze_url = "https://ca.cloud.smartlogic.com/svc/5457e590-c2cc-4219-8947-e7f74c8675be/?operation=classify"
 
         #  SEMAPHORE_API_KEY Goes Here
-        self.api_key = os.getenv("SEMAPHORE_API_KEY")
+        self.api_key = "OoP3QRRkLVCzo4sRa6iAyg=="
 
-        #  SEMAPHORE_SEARCH_URL Goes Here
-        self.search_url = os.getenv("SEMAPHORE_SEARCH_URL")
+#  SEMAPHORE_SEARCH_URL Goes Here
+        self.search_url = "https://ca.cloud.smartlogic.com/svc/5457e590-c2cc-4219-8947-e7f74c8675be/SES//CPKnowledgeSystem/en/hints/"
 
-        #  SEMAPHORE_GET_PARENT_URL Goes Here
-        self.get_parent_url = os.getenv("SEMAPHORE_GET_PARENT_URL")
+	#  SEMAPHORE_GET_PARENT_URL Goes Here
+        self.get_parent_url = "https://ca.cloud.smartlogic.com/svc/5457e590-c2cc-4219-8947-e7f74c8675be/SES/CPKnowledgeSystem/relatedFrom/"
+    
+    #  SEMAPHORE_CREATE_TAG_URL Goes Here
+        self.create_tag_url = "https://ca.cloud.smartlogic.com/semaphore/71ef3209-3436-4530-b8ad-0950cc2236c1/kmm/api"
 
-        #  SEMAPHORE_CREATE_TAG_URL Goes Here
-        self.create_tag_url = os.getenv("SEMAPHORE_CREATE_TAG_URL")
+	#  SEMAPHORE_CREATE_TAG_TASK Goes Here
+        self.create_tag_task = "/task:CPKnowledgeSystem:SuggestedTerm"
 
-        #  SEMAPHORE_CREATE_TAG_TASK Goes Here
-        self.create_tag_task = os.getenv("SEMAPHORE_CREATE_TAG_TASK")
-
-        #  SEMAPHORE_CREATE_TAG_QUERY Goes Here
-        self.create_tag_query = os.getenv("SEMAPHORE_CREATE_TAG_QUERY")
-
-        "For UAT test, the Index file needs to put in this folder  /opt/superdesk/server "
-        # self.index_file_path = "Index.json"
+    #  SEMAPHORE_CREATE_TAG_QUERY Goes Here
+        self.create_tag_query = "/skos:Concept/rdf:instance"
 
         self.output = self.analyze(data)
 
@@ -118,7 +115,7 @@ class Semaphore(AIServiceBase):
             return []
 
     # Analyze2 changed name to analyze_parent_info
-    def analyze_parent_info(self, html_content: str) -> dict:
+    def analyze_parent_info(self, html_content) -> dict:
         try:
             if not self.base_url or not self.api_key:
                 logger.warning(
@@ -217,9 +214,11 @@ class Semaphore(AIServiceBase):
                             broader_entry = {
                                 "name": reversed_parent_info[i]["name"],
                                 "qcode": reversed_parent_info[i]["qcode"],
-                                "parent": reversed_parent_info[i + 1]["qcode"]
-                                if i + 1 < len(reversed_parent_info)
-                                else None,
+                                "parent": (
+                                    reversed_parent_info[i + 1]["qcode"]
+                                    if i + 1 < len(reversed_parent_info)
+                                    else None
+                                ),
                                 "creator": "Human",
                                 "source": "Semaphore",
                                 "relevance": "100",
@@ -280,8 +279,14 @@ class Semaphore(AIServiceBase):
             logger.error(
                 f"Semaphore Search request failed. We are in analyze RequestError exception: {str(e)}"
             )
+            return {}
 
-    def create_tag_in_semaphore(self, html_content: str) -> dict:
+    def create_tag_in_semaphore(self, html_content) -> dict:
+        result_summary: Dict[str, List[str]] = {
+            "created_tags": [],
+            "failed_tags": [],
+            "existing_tags": [],
+        }
         try:
             if not self.create_tag_url or not self.api_key:
                 logger.warning(
@@ -350,27 +355,23 @@ class Semaphore(AIServiceBase):
                             "Tag already exists in KMM. Response is 409 . The Tag is: "
                             + concept_name
                         )
+                        result_summary["existing_tags"].append(concept_name)
 
                     else:
                         response.raise_for_status()
                         print("Tag Got Created is: " + concept_name)
-
-                except HTTPError as http_err:
-                    # Handle specific HTTP errors here
-                    logger.error(f"HTTP error occurred: {http_err}")
+                        result_summary["created_tags"].append(concept_name)
                 except Exception as e:
-                    traceback.print_exc()
-                    logger.error(
-                        f"An error occurred while making the create tag request: {str(e)}"
-                    )
+                    print(f"Failed to create tag: {concept_name}, Error: {e}")
+                    result_summary["failed_tags"].append(concept_name)
 
-        except requests.exceptions.RequestException as e:
-            traceback.print_exc()
-            logger.error(
-                f"Semaphore Create Tag Failed failed. We are in analyze RequestError exception: {str(e)}"
-            )
+        except Exception as e:
+            print(f"Semaphore Create Tag operation failed: {e}")
+            return {"error": f"Create Tag operation failed: {e}"}
 
-    def analyze(self, html_content: str) -> dict:
+        return result_summary
+
+    def analyze(self, html_content) -> dict:
         try:
             if not self.base_url or not self.api_key:
                 logger.warning(
@@ -495,9 +496,11 @@ class Semaphore(AIServiceBase):
                         ]:
                             meta_score = adjust_score(
                                 meta_score,
-                                path_labels.keys()
-                                if meta_name == "Media Topic_PATH_LABEL"
-                                else path_guids.keys(),
+                                (
+                                    path_labels.keys()
+                                    if meta_name == "Media Topic_PATH_LABEL"
+                                    else path_guids.keys()
+                                ),
                             )
 
                         # Split and process path labels or GUIDs
@@ -581,12 +584,14 @@ class Semaphore(AIServiceBase):
             logger.error(
                 f"Semaphore request failed. We are in analyze RequestError exception: {str(e)}"
             )
+            return {}
 
         except Exception as e:
             traceback.print_exc()
             logger.error(f"An error occurred. We are in analyze exception: {str(e)}")
+            return {}
 
-    def html_to_xml(self, html_content: str) -> str:
+    def html_to_xml(self, html_content) -> str:
         def clean_html_content(input_str):
             # Remove full HTML tags using regular expressions
             your_string = input_str.replace("<p>", "")
