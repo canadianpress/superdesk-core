@@ -39,19 +39,19 @@ class Semaphore(AIServiceBase):
         #  SEMAPHORE_API_KEY Goes Here
         self.api_key = "OoP3QRRkLVCzo4sRa6iAyg=="
 
-#  SEMAPHORE_SEARCH_URL Goes Here
+        #  SEMAPHORE_SEARCH_URL Goes Here
         self.search_url = "https://ca.cloud.smartlogic.com/svc/5457e590-c2cc-4219-8947-e7f74c8675be/SES//CPKnowledgeSystem/en/hints/"
 
-	#  SEMAPHORE_GET_PARENT_URL Goes Here
+	    #  SEMAPHORE_GET_PARENT_URL Goes Here
         self.get_parent_url = "https://ca.cloud.smartlogic.com/svc/5457e590-c2cc-4219-8947-e7f74c8675be/SES/CPKnowledgeSystem/relatedFrom/"
     
-    #  SEMAPHORE_CREATE_TAG_URL Goes Here
+        #  SEMAPHORE_CREATE_TAG_URL Goes Here
         self.create_tag_url = "https://ca.cloud.smartlogic.com/semaphore/71ef3209-3436-4530-b8ad-0950cc2236c1/kmm/api"
 
-	#  SEMAPHORE_CREATE_TAG_TASK Goes Here
+	    #  SEMAPHORE_CREATE_TAG_TASK Goes Here
         self.create_tag_task = "/task:CPKnowledgeSystem:SuggestedTerm"
 
-    #  SEMAPHORE_CREATE_TAG_QUERY Goes Here
+        #  SEMAPHORE_CREATE_TAG_QUERY Goes Here
         self.create_tag_query = "/skos:Concept/rdf:instance"
 
         self.output = self.analyze(data)
@@ -448,22 +448,7 @@ class Semaphore(AIServiceBase):
             root = response.text
 
             def transform_xml_response(xml_data):
-                # Parse the XML data
-                root = ET.fromstring(xml_data)
-
-                # Initialize a dictionary to hold the transformed data
-                response_dict = {
-                    "subject": [],
-                    "organisation": [],
-                    "person": [],
-                    "event": [],
-                    "place": [],
-                }
-
-                # Temporary storage for path labels and GUIDs
-                path_labels = {}
-                path_guids = {}
-
+                
                 # Helper function to add data to the dictionary if it's not a duplicate and has a qcode
                 def add_to_dict(group, tag_data):
                     if tag_data["qcode"] and tag_data not in response_dict[group]:
@@ -481,8 +466,29 @@ class Semaphore(AIServiceBase):
                         )  # Keep score to three decimal places
                     return score
 
+                
+                # Parse the XML data
+                root = ET.fromstring(xml_data)
+                
+                # Find the ARTICLE element
+                article_element = root.find('STRUCTUREDDOCUMENT/ARTICLE')
+
+                # Initialize a dictionary to hold the transformed data
+                response_dict = {
+                    "subject": [],
+                    "organisation": [],
+                    "person": [],
+                    "event": [],
+                    "place": [],
+                }
+
+                # Temporary storage for path labels and GUIDs
+                path_labels = {}
+                path_guids = {}
+
+
                 # Iterate through the XML elements and populate the dictionary
-                for element in root.iter():
+                for element in article_element.iter():
                     if element.tag == "META":
                         meta_name = element.get("name")
                         meta_value = element.get("value")
