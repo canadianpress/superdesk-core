@@ -83,14 +83,23 @@ class Semaphore(AIServiceBase):
         response.raise_for_status()
         return response.json().get("access_token")
 
-    def fetch_parent_info(self, qcode):
+    def fetch_parent_info(self, qcode, article_language):
         headers = {"Authorization": f"Bearer {self.get_access_token()}"}
         try:
             frank = "?relationshipType=has%20broader"
 
             query = qcode
+            
+            logger.warning("self.get_parent_url: %s", self.get_parent_url)
+            
+            # If the language is French (fr-CA), replace "en" in the search_url with "fr"
+            if article_language == "fr-CA":
+                self.get_parent_url = self.get_parent_url.replace("/en/", "/fr/")
+
             parent_url = self.get_parent_url + query + frank
 
+            logger.warning("parent_url: %s", parent_url)
+            
             response = session.get(parent_url, headers=headers)
             response.raise_for_status()
             root = ET.fromstring(response.text)
@@ -126,13 +135,13 @@ class Semaphore(AIServiceBase):
             query = html_content["searchString"]
             
             # Extract the language from the html_content dictionary, default to "en_CA" if not present
-            language = html_content.get("language")
+            article_language = html_content.get("language")
             
-            logger.warning("language: %s", language)
+            logger.warning("language: %s", article_language)
             logger.warning("self.search_url: %s", self.search_url)
 
-            # If the language is French (fr_CA), replace "en" in the search_url with "fr"
-            if language == "fr-CA":
+            # If the language is French (fr-CA), replace "en" in the search_url with "fr"
+            if article_language == "fr-CA":
                 self.search_url = self.search_url.replace("/en/", "/fr/")
 
             new_url = self.search_url + query + ".json"
@@ -153,7 +162,7 @@ class Semaphore(AIServiceBase):
             root = response.text
 
             # def transform_xml_response(xml_data):
-            def transform_xml_response(api_response):
+            def transform_xml_response(api_response, article_language):
                 result = {
                     "subject": [],
                     "organisation": [],
@@ -210,7 +219,7 @@ class Semaphore(AIServiceBase):
                     else:
                         # Fetch parent info for each subject item
                         parent_info, reversed_parent_info = self.fetch_parent_info(
-                            item["id"]
+                            item["id"], article_language
                         )
 
                         # Assign the immediate parent to the subject item
@@ -281,7 +290,7 @@ class Semaphore(AIServiceBase):
                 return result
 
             root = json.loads(root)
-            json_response = transform_xml_response(root)
+            json_response = transform_xml_response(root, article_language)
 
             json_response = convert_to_desired_format(json_response)
 
