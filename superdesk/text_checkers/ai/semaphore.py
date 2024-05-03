@@ -127,12 +127,17 @@ class Semaphore(AIServiceBase):
             
             # Extract the language from the html_content dictionary, default to "en_CA" if not present
             language = html_content.get("language")
+            
+            print("language:" + language)
+            print("self.search_url:"+ self.search_url)
 
             # If the language is French (fr_CA), replace "en" in the search_url with "fr"
             if language == "fr-CA":
                 self.search_url = self.search_url.replace("/en/", "/fr/")
 
             new_url = self.search_url + query + ".json"
+            
+            print("new_url:" + new_url)
 
             # Make a POST request using XML payload
             headers = {"Authorization": f"bearer {self.get_access_token()}"}
@@ -157,7 +162,8 @@ class Semaphore(AIServiceBase):
                     "place": [],
                     "broader": [],
                 }
-
+                print("termHints", api_response["termHints"])
+                
                 # Process each termHint item in the API response
                 for item in api_response["termHints"]:
                     scheme_url = "http://cv.cp.org/"
@@ -179,7 +185,7 @@ class Semaphore(AIServiceBase):
                         category = "subject"
                         scheme_url = "http://cv.iptc.org/newscodes/mediatopic/"
 
-                    score = item.get("score", "100")
+                    score = item.get("score", "47")
                     entry = {
                         "name": item["name"],
                         "qcode": item["id"],
