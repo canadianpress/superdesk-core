@@ -13,6 +13,7 @@ from typing import Dict, List
 
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(filename='/var/log/superdesk/main.log', level=logging.DEBUG)
 session = requests.Session()
 
 TIMEOUT = (5, 30)
@@ -128,8 +129,8 @@ class Semaphore(AIServiceBase):
             # Extract the language from the html_content dictionary, default to "en_CA" if not present
             language = html_content.get("language")
             
-            print("language:" + language)
-            print("self.search_url:"+ self.search_url)
+            logging.info("language: %s", language)
+            logging.info("self.search_url: %s", self.search_url)
 
             # If the language is French (fr_CA), replace "en" in the search_url with "fr"
             if language == "fr-CA":
@@ -137,7 +138,7 @@ class Semaphore(AIServiceBase):
 
             new_url = self.search_url + query + ".json"
             
-            print("new_url:" + new_url)
+            logging.info("new_url: %s", new_url)
 
             # Make a POST request using XML payload
             headers = {"Authorization": f"bearer {self.get_access_token()}"}
@@ -162,7 +163,7 @@ class Semaphore(AIServiceBase):
                     "place": [],
                     "broader": [],
                 }
-                print("termHints", api_response["termHints"])
+                logging.info("termHints: %s", api_response["termHints"])
                 
                 # Process each termHint item in the API response
                 for item in api_response["termHints"]:
