@@ -122,8 +122,15 @@ class Semaphore(AIServiceBase):
                     "Semaphore Search is not configured properly, can't analyze content"
                 )
                 return {}
-
+            # Extract the search string from the html_content dictionary
             query = html_content["searchString"]
+            
+            # Extract the language from the html_content dictionary, default to "en_CA" if not present
+            language = html_content.get("language")
+
+            # If the language is French (fr_CA), replace "en" in the search_url with "fr"
+            if language == "fr-CA":
+                self.search_url = self.search_url.replace("/en/", "/fr/")
 
             new_url = self.search_url + query + ".json"
 
@@ -598,8 +605,9 @@ class Semaphore(AIServiceBase):
             return {}
 
     def html_to_xml(self, html_content) -> str:
+        
+        # Remove HTML tags using regular expressions
         def clean_html_content(input_str):
-            # Remove full HTML tags using regular expressions
             your_string = input_str.replace("<p>", "")
             your_string = your_string.replace("</p>", "")
             your_string = your_string.replace("<br>", "")
@@ -618,6 +626,9 @@ class Semaphore(AIServiceBase):
                     &lt;headline_extended&gt;{}&lt;/headline_extended&gt;
                     &lt;body_html&gt;{}&lt;/body_html&gt;
                     &lt;slugline&gt;{}&lt;/slugline&gt;
+                    &lt;env&gt;{}&lt;/env&gt;
+                    &lt;guid&gt;{}&lt;/guid&gt;
+                    &lt;guid&gt;{}&lt;/guid&gt;
                 &lt;/story&gt;
                 </body>
                 </document>
@@ -628,11 +639,14 @@ class Semaphore(AIServiceBase):
         headline = html_content["headline"]
         headline_extended = html_content["abstract"]
         slugline = html_content["slugline"]
+        env = html_content["env"]
 
         # Embed the 'body_html' into the XML template
         xml_output = xml_template.format(
             headline, headline_extended, body_html, slugline
         )
+
+        # Remove html tags from the template
         xml_output = clean_html_content(xml_output)
 
         return xml_output
