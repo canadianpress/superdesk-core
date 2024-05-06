@@ -643,6 +643,8 @@ class Semaphore(AIServiceBase):
                     &lt;body_html&gt;{}&lt;/body_html&gt;
                     &lt;slugline&gt;{}&lt;/slugline&gt;
                     &lt;guid&gt;{}&lt;/guid&gt;
+                    &lt;env&gt;{}&lt;/env&gt;
+                    &lt;dateTime&gt;{}&lt;/dateTime&gt;
                 &lt;/story&gt;
                 </body>
                 </document>
