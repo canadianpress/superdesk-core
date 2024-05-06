@@ -10,7 +10,6 @@ import io
 import superdesk
 import json
 import datetime
-import re
 from typing import Dict, List
 
 
@@ -694,9 +693,11 @@ def capitalize_name_if_parent_none(tag):
 
 # Function to capitalize all words in a string, but leave 's in lowercase
 def capitalize_words_except_s(s):
-    # Use a regular expression to match words and capitalize them, but leave 's in lowercase
-    return re.sub(r"\b(\w+)'s\b", lambda match: match.group(1).capitalize() + "'s",
-                  re.sub(r'\b\w+\b', lambda match: match.group(0).capitalize(), s))
+    # Capitalize the first letter of each word
+    s = s.title()
+    # Change "'S" back to "'s"
+    s = s.replace("'S", "'s")
+    return s
 
 def capitalize_name_if_parent_none_for_analyze(response):
     # Iterate over each category
