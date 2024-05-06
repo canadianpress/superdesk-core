@@ -9,6 +9,7 @@ import traceback
 import io
 import superdesk
 import json
+import datetime
 from typing import Dict, List
 
 
@@ -641,8 +642,6 @@ class Semaphore(AIServiceBase):
                     &lt;headline_extended&gt;{}&lt;/headline_extended&gt;
                     &lt;body_html&gt;{}&lt;/body_html&gt;
                     &lt;slugline&gt;{}&lt;/slugline&gt;
-                    &lt;env&gt;{}&lt;/env&gt;
-                    &lt;guid&gt;{}&lt;/guid&gt;
                     &lt;guid&gt;{}&lt;/guid&gt;
                 &lt;/story&gt;
                 </body>
@@ -654,11 +653,13 @@ class Semaphore(AIServiceBase):
         headline = html_content["headline"]
         headline_extended = html_content["abstract"]
         slugline = html_content["slugline"]
-        env = html_content["env"]
+        guid = html_content["guid"]
+        env = self.api_key[-4:]
+        dateTime = datetime.datetime.now().isoformat()
 
         # Embed the 'body_html' into the XML template
         xml_output = xml_template.format(
-            headline, headline_extended, body_html, slugline
+            headline, headline_extended, body_html, slugline, guid, env, dateTime
         )
 
         # Remove html tags from the template
