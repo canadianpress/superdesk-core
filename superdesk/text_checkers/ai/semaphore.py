@@ -548,17 +548,18 @@ class Semaphore(AIServiceBase):
                         elif meta_name == "Place":
                             group = "place"
                             scheme_url = "http://cv.cp.org/Places/"
-                    
-                    tag_data = {
-                        "name": meta_value,
-                        "qcode": meta_id if meta_id else "",
-                        "creator": "Machine",
-                        "source": "Semaphore",
-                        "relevance": meta_score,
-                        "altids": f'{{"{meta_value}": "{meta_id}"}}',
-                        "original_source": "original_source_value",
-                        "scheme": scheme_url,
-                    }
+                        
+                        if group:
+                            tag_data = {
+                                "name": meta_value,
+                                "qcode": meta_id if meta_id else "",
+                                "creator": "Machine",
+                                "source": "Semaphore",
+                                "relevance": meta_score,
+                                "altids": f'{{"{meta_value}": "{meta_id}"}}',
+                                "original_source": "original_source_value",
+                                "scheme": scheme_url,
+                            }
                     
                     add_to_dict(group, tag_data)
 
