@@ -494,7 +494,14 @@ class Semaphore(AIServiceBase):
                 root = ET.fromstring(xml_data)
                 
                 # Find the ARTICLE element
-                article_element = root.find('STRUCTUREDDOCUMENT/ARTICLE')
+                article_elements = root.find('STRUCTUREDDOCUMENT/ARTICLE')
+
+                # Find all 'SYSTEM' child elements under 'ARTICLE'
+                system_elements = article_elements.findall('SYSTEM')
+
+                # Remove each 'SYSTEM' element
+                for system_element in system_elements:
+                    article_elements.remove(system_element)
 
                 # Initialize a dictionary to hold the transformed data
                 response_dict = {
@@ -505,73 +512,59 @@ class Semaphore(AIServiceBase):
                     "place": [],
                 }
 
-                # Temporary storage for path labels and GUIDs
+                # Initialize path labels and GUIDs
                 path_labels = {}
                 path_guids = {}
 
 
                 # Iterate through the XML elements and populate the dictionary
-                for element in article_element.iter():
-                    if element.tag == "META":
-                        meta_name = element.get("name")
-                        meta_value = element.get("value")
-                        meta_score = element.get("score", "0")
-                        meta_id = element.get("id")
+                for element in article_elements.iter():
+                    
+                    meta_name = element.get("name")
+                    meta_value = element.get("value")
+                    meta_score = element.get("score", "0")
+                    meta_id = element.get("id")
+                    group = None
 
-                        # Adjust score if necessary to avoid duplicates
-                        if meta_name in [
-                            "Media Topic_PATH_LABEL",
-                            "Media Topic_PATH_GUID",
-                        ]:
-                            meta_score = adjust_score(
-                                meta_score,
-                                (
-                                    path_labels.keys()
-                                    if meta_name == "Media Topic_PATH_LABEL"
-                                    else path_guids.keys()
-                                ),
-                            )
+                    # Adjust score if necessary to avoid duplicates
+                    if meta_name == "Media Topic_PATH_LABEL" or meta_name == "Media Topic_PATH_GUID":
 
                         # Split and process path labels or GUIDs
                         if meta_name == "Media Topic_PATH_LABEL":
-                            path_labels[meta_score] = meta_value.split("/")[1:]
+                            path_labels[meta_value.split("/")[-1]] = meta_value.split("/")[1:]
                         elif meta_name == "Media Topic_PATH_GUID":
-                            path_guids[meta_score] = meta_value.split("/")[1:]
+                            path_guids[meta_value.split("/")[-1]] = meta_value.split("/")[1:]
 
-                        # Process 'Media Topic_PATH_LABEL' and 'Media Topic_PATH_GUID'
+                    else:
+                        if meta_name == "Organization":
+                            group = "organisation"
+                            scheme_url = "http://cv.cp.org/Organizations/"
+                        elif meta_name == "Person":
+                            group = "person"
+                            scheme_url = "http://cv.cp.org/People/"
+                        elif meta_name == "Event":
+                            group = "event"
+                            scheme_url = "http://cv.cp.org/Events/"
+                        elif meta_name == "Place":
+                            group = "place"
+                            scheme_url = "http://cv.cp.org/Places/"
+                    
+                    tag_data = {
+                        "name": meta_value,
+                        "qcode": meta_id if meta_id else "",
+                        "creator": "Machine",
+                        "source": "Semaphore",
+                        "relevance": meta_score,
+                        "altids": f'{{"{meta_value}": "{meta_id}"}}',
+                        "original_source": "original_source_value",
+                        "scheme": scheme_url,
+                    }
+                    
+                    add_to_dict(group, tag_data)
 
-                        # Process other categories
-                        else:
-                            group = None
-                            if "Organization" in meta_name:
-                                group = "organisation"
-                                scheme_url = "http://cv.cp.org/Organizations/"
-                            elif "Person" in meta_name:
-                                group = "person"
-                                scheme_url = "http://cv.cp.org/People/"
-                            elif "Event" in meta_name:
-                                group = "event"
-                                scheme_url = "http://cv.cp.org/Events/"
-                            elif "Place" in meta_name:
-                                group = "place"
-                                scheme_url = "http://cv.cp.org/Places/"
-
-                            if group:
-                                tag_data = {
-                                    "name": meta_value,
-                                    "qcode": meta_id if meta_id else "",
-                                    "creator": "Machine",
-                                    "source": "Semaphore",
-                                    "relevance": meta_score,
-                                    "altids": f'{{"{meta_value}": "{meta_id}"}}',
-                                    "original_source": "original_source_value",
-                                    "scheme": scheme_url,
-                                }
-                                add_to_dict(group, tag_data)
-
-                # Match path labels with path GUIDs based on scores
-                for score, labels in path_labels.items():
-                    guids = path_guids.get(score, [])
+                # Match path labels with path GUIDs based on the last instance of the GUID
+                for score, guid, labels in path_labels.items():
+                    guids = path_guids.get(guid, [])
                     if len(labels) != len(guids):
                         continue  # Skip if there's a mismatch in the number of labels and GUIDs
 
