@@ -247,9 +247,9 @@ class Semaphore(AIServiceBase):
                                     if i + 1 < len(reversed_parent_info)
                                     else None
                                 ),
-                                "creator": "Human",
+                                "creator": reversed_parent_info[i]["creator"],
                                 "source": "Semaphore",
-                                "relevance": "47",
+                                "relevance": reversed_parent_info[i]["relevance"],
                                 "altids": {"source_name": "source_id"},
                                 "original_source": "original_source_value",
                                 "scheme": "http://cv.iptc.org/newscodes/mediatopic/",
@@ -396,6 +396,40 @@ class Semaphore(AIServiceBase):
         return result_summary
 
     def analyze(self, html_content) -> dict:
+        
+        def filter_by_max_relevance(response_dict):
+            # Initialize an empty dictionary to store the maximum relevance for each qcode
+            max_relevance_dict = {}
+    
+            # Iterate over each item in the response_dict
+            for tag, tag_data_list in response_dict.items():
+            
+                # Iterate over each dictionary in the tag_data_list
+                for tag_data in tag_data_list:
+                
+                    # Extract the qcode and relevance from the current dictionary
+                    # Convert the relevance to a float for comparison
+                    qcode = tag_data['qcode']
+                    relevance = float(tag_data['relevance'])
+    
+                    # If the qcode is already in max_relevance_dict, compare the relevances
+                    if qcode in max_relevance_dict:
+                    
+                        # If the current relevance is greater, update the dictionary in max_relevance_dict
+                        # Convert the stored relevance to a float for comparison
+                        if relevance > float(max_relevance_dict[qcode]['relevance']):
+                            max_relevance_dict[qcode] = tag_data
+                            max_relevance_dict[qcode]['relevance'] = relevance  # Store the relevance as a float
+    
+                    # If the qcode is not in max_relevance_dict, add the current dictionary
+                    else:
+                        max_relevance_dict[qcode] = tag_data
+                        max_relevance_dict[qcode]['relevance'] = relevance  # Store the relevance as a float
+    
+            # Return max_relevance_dict, which contains the maximum relevance for each qcode
+            return max_relevance_dict
+
+        
         try:
             if not self.base_url or not self.api_key:
                 logger.warning(
@@ -603,6 +637,9 @@ class Semaphore(AIServiceBase):
                             guid  # Update the parent qcode for the next iteration
                         )
 
+                response_dict = filter_by_max_relevance(response_dict)
+
+                print("Response dict: ", response_dict)
                 return response_dict
 
             json_response = transform_xml_response(root)
