@@ -585,24 +585,28 @@ class NINJSFormatter_2(Formatter):
                 if item.get("in_jimi") is True:
                     name_in_vocab = item.get("name")
                     qcode = item.get("qcode")
+                    score = item.get("score")
+                    creator = item.get("creator")
                     translated_name = (
                         item.get("translations", {})
                         .get("name", {})
                         .get(language, name_in_vocab)
                     )
-                    vocab_mapping[name_in_vocab.lower()] = (qcode, translated_name)
+                    vocab_mapping[name_in_vocab.lower()] = (qcode, translated_name, score, creator)
 
             updated_subjects = list(ninjs["subject"])
 
             for subject in ninjs["subject"]:
                 subject_name = subject.get("name").lower()
                 if subject_name in vocab_mapping:
-                    qcode, translated_name = vocab_mapping[subject_name]
+                    qcode, translated_name, score, creator = vocab_mapping[subject_name]
                     updated_subjects.append(
                         {
                             "code": qcode,
                             "name": translated_name,
                             "scheme": "http://cv.cp.org/cp-subject-legacy/",
+                            "score": score,
+                            "creator": creator
                         }
                     )
 
