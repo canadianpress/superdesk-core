@@ -82,7 +82,12 @@ class Semaphore(AIServiceBase):
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         response = session.post(url, headers=headers, data=payload, timeout=TIMEOUT)
         response.raise_for_status()
-        return response.json().get("access_token")
+        
+        if response.status_code == 200:
+            return response.json().get("access_token")
+        else:
+            print("Failed to get access token")
+            return None
 
     def fetch_parent_info(self, qcode, article_language):
         headers = {"Authorization": f"Bearer {self.get_access_token()}"}
@@ -325,35 +330,31 @@ class Semaphore(AIServiceBase):
 
             new_url = url + task + query_string
 
+            access_token = self.get_access_token()
+
             # Make a POST request using XML payload
-            headers = {
-                "Authorization": f"bearer {self.get_access_token()}",
-                "Content-Type": "application/ld+json",
-            }
+            if access_token is not None:
+                headers = {
+                    "Authorization": f"bearer {access_token}",
+                    "Content-Type": "application/ld+json",
+                }
+            else:
+                print("Failed to set authorization header")
 
             manual_tags = extract_manual_tags(html_content["data"])
 
             for item in manual_tags:
-                # print(item)
-
                 concept_name = item["name"]
                 scheme = item["scheme"]
-
-                if scheme == "subject":
-                    id_value = "http://cv.cp.org/4916d989-2227-4f2d-8632-525cd462ab9f"
-
-                elif scheme == "organization":
-                    id_value = "http://cv.cp.org/e2c332d3-05e0-4dcc-b358-9e4855e80e88"
-
-                elif scheme == "places":
-                    id_value = "http://cv.cp.org/c3b17bf6-7969-424d-92ae-966f4f707a95"
-
-                elif scheme == "person":
-                    id_value = "http://cv.cp.org/1630a532-329f-43fe-9606-b381330c35cf"
-
-                elif scheme == "event":
-                    id_value = "http://cv.cp.org/3c493189-023f-4d14-a2f4-fc7b79735ffc"
-
+                scheme_id_map = {
+                    "subject": "http://cv.cp.org/4916d989-2227-4f2d-8632-525cd462ab9f",
+                    "organization": "http://cv.cp.org/e2c332d3-05e0-4dcc-b358-9e4855e80e88",
+                    "places": "http://cv.cp.org/c3b17bf6-7969-424d-92ae-966f4f707a95",
+                    "person": "http://cv.cp.org/1630a532-329f-43fe-9606-b381330c35cf",
+                    "event": "http://cv.cp.org/3c493189-023f-4d14-a2f4-fc7b79735ffc",
+                }
+                id_value = scheme_id_map.get(scheme, "")
+                
                 payload = json.dumps(
                     {
                         "@type": ["skos:Concept"],
@@ -447,6 +448,8 @@ class Semaphore(AIServiceBase):
                             )
                             print("Running to Create a New Tag in Semaphore")
                             self.output = self.create_tag_in_semaphore(item)
+                            
+                            # Sending feedback to Semaphore
                             return self.output
 
             except TypeError:
