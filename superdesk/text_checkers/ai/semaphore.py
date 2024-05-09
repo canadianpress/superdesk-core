@@ -425,7 +425,6 @@ class Semaphore(AIServiceBase):
             # Return max_relevance_dict, which contains the maximum relevance for each qcode
             return max_relevance_dict
 
-        
         try:
             if not self.base_url or not self.api_key:
                 logger.warning(

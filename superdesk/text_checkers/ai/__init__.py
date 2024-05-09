@@ -34,7 +34,7 @@ class AIResource(Resource):
             "required": True,
             "schema": {
                 "guid": {"type": "string", "required": False},
-                "abstract": {"type": "string", "required": False},
+                "headline_extended": {"type": "string", "required": False},
                 "language": {"type": "string", "required": False},
                 "headline": {"type": "string", "nullable": False},
                 "slugline": {"type": "string", "required": False},
