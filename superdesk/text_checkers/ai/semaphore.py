@@ -142,17 +142,14 @@ class Semaphore(AIServiceBase):
             
             # Extract the language from the html_content dictionary, default to "en_CA" if not present
             article_language = html_content.get("language")
-            
-            logger.warning("language: %s", article_language)
-            logger.warning("self.search_url: %s", self.search_url)
+
 
             # If the language is French (fr-CA), replace "en" in the search_url with "fr"
             if article_language == "fr-CA":
                 self.search_url = self.search_url.replace("/en/", "/fr/")
 
             new_url = self.search_url + query + ".json"
-            
-            logger.warning("new_url: %s", new_url)
+
 
             # Make a POST request using XML payload
             headers = {"Authorization": f"bearer {self.get_access_token()}"}
@@ -177,7 +174,6 @@ class Semaphore(AIServiceBase):
                     "place": [],
                     "broader": [],
                 }
-                logger.warning("termHints: %s", api_response["termHints"])
                 
                 # Process each termHint item in the API response
                 for item in api_response["termHints"]:
@@ -700,7 +696,7 @@ class Semaphore(AIServiceBase):
 
         body_html = html_content["body_html"]
         headline = html_content["headline"]
-        headline_extended = html_content["abstract"]
+        headline_extended = html_content["headline_extended"]
         slugline = html_content["slugline"]
         guid = html_content["guid"]
         env = self.api_key[-4:]
