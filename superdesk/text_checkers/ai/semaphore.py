@@ -114,12 +114,13 @@ class Semaphore(AIServiceBase):
             if path is not None:
                 for field in path.findall("FIELD"):
                     if field.find("CLASS").get("NAME") == "Topic":
-                        score = field.get("score", "0")
+                        score = field.get("score", ".47")
                         parent_info.append(
                             {
                                 "name": field.get("NAME"),
                                 "qcode": field.get("ID"),
                                 "relevance": score,
+                                "creator": "Human",
                                 "parent": None,  # Set to None initially
                             }
                         )
@@ -196,7 +197,7 @@ class Semaphore(AIServiceBase):
                         category = "subject"
                         scheme_url = "http://cv.iptc.org/newscodes/mediatopic/"
 
-                    score = item.get("score", "47")
+                    score = item.get("score", ".47")
                     entry = {
                         "name": item["name"],
                         "qcode": item["id"],
@@ -243,9 +244,9 @@ class Semaphore(AIServiceBase):
                                     if i + 1 < len(reversed_parent_info)
                                     else None
                                 ),
-                                "creator": reversed_parent_info[i]["creator"],
+                                "creator": "Human",
                                 "source": "Semaphore",
-                                "relevance": reversed_parent_info[i]["relevance"],
+                                "relevance": ".47",
                                 "altids": {"source_name": "source_id"},
                                 "original_source": "original_source_value",
                                 "scheme": "http://cv.iptc.org/newscodes/mediatopic/",
@@ -628,7 +629,7 @@ class Semaphore(AIServiceBase):
             return {}
 
     def html_to_xml(self, html_content) -> str:
-        
+        print(f"html_content: {html_content}")
         # Remove HTML tags using regular expressions
         def clean_html_content(input_str):
             your_string = input_str.replace("<p>", "")
@@ -658,7 +659,13 @@ class Semaphore(AIServiceBase):
                 </request>
                 """
 
-        body_html = html_content["body_html"]
+        # Check if 'body_html' key exists in the dictionary
+        if 'body_html' in html_content:
+            body_html = html_content["body_html"]
+        else:
+            # Handle the case where 'body_html' does not exist
+            # This is just an example, modify it according to your needs
+            raise KeyError("The key 'body_html' does not exist in the input dictionary.")
         headline = html_content["headline"]
         headline_extended = html_content["headline_extended"]
         slugline = html_content["slugline"]
