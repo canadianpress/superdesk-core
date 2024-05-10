@@ -659,13 +659,7 @@ class Semaphore(AIServiceBase):
                 </request>
                 """
 
-        # Check if 'body_html' key exists in the dictionary
-        if 'body_html' in html_content:
-            body_html = html_content["body_html"]
-        else:
-            # Handle the case where 'body_html' does not exist
-            # This is just an example, modify it according to your needs
-            raise KeyError("The key 'body_html' does not exist in the input dictionary.")
+        body_html = html_content["body_html"]
         headline = html_content["headline"]
         headline_extended = html_content["headline_extended"]
         slugline = html_content["slugline"]
