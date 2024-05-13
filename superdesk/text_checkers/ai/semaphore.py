@@ -697,9 +697,8 @@ def extract_manual_tags(data):
 def capitalize_name_if_parent_none(tag):
     # Check if 'parent' is None and capitalize the first letter of 'name' if so
     if tag.get("parent") is None:
-        tag["name"] = tag["name"].title()
+        tag["name"] = capitalize_words_except_s(tag["name"])
     return tag
-
 
 # Function to capitalize all words in a string, but leave 's in lowercase
 def capitalize_words_except_s(s):
