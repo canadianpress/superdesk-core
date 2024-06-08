@@ -271,7 +271,8 @@ class Semaphore(AIServiceBase):
             root = json.loads(root)
             json_response = transform_xml_response(root, article_language)
 
-            json_response = convert_to_desired_format(json_response)
+            # Commenting out to disable capitalizing
+            # json_response = convert_to_desired_format(json_response)
 
             return json_response
 
@@ -531,8 +532,8 @@ class Semaphore(AIServiceBase):
                 return response_dict
 
             json_response = transform_xml_response(root)
-
-            json_response = capitalize_name_if_parent_none_for_analyze(json_response)
+            # Commenting out to disable capitalizing
+            # json_response = capitalize_name_if_parent_none_for_analyze(json_response)
 
             try:
                 updated_output = replace_qcodes(json_response)
@@ -619,17 +620,8 @@ def extract_manual_tags(data):
 def capitalize_name_if_parent_none(tag):
     # Check if 'parent' is None and capitalize the first letter of 'name' if so
     if tag.get("parent") is None:
-        tag["name"] = capitalize_words_except_s(tag["name"])
+        tag["name"] = tag["name"].title()
     return tag
-
-
-# Function to capitalize all words in a string, but leave 's in lowercase
-def capitalize_words_except_s(s):
-    # Capitalize the first letter of each word
-    s = s.title()
-    # Change "'S" back to "'s"
-    s = s.replace("'S", "'s")
-    return s
 
 
 def capitalize_name_if_parent_none_for_analyze(response):
@@ -637,10 +629,7 @@ def capitalize_name_if_parent_none_for_analyze(response):
     for category in ["subject", "organisation", "person", "event", "place"]:
         # Iterate over each item in the current category
         for item in response.get(category, []):
-            # If the item has no parent
-            if item.get("parent") is None:
-                # Capitalize the name of the item, but leave 's in lowercase
-                item["name"] = capitalize_words_except_s(item["name"])
+           item = capitalize_name_if_parent_none(item)
     # Return the modified response
     return response
 
