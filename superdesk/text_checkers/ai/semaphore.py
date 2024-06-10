@@ -142,6 +142,8 @@ class Semaphore(AIServiceBase):
             # If the language is French (fr-CA), replace "en" in the search_url with "fr"
             if article_language == "fr-CA":
                 self.search_url = self.search_url.replace("/en/", "/fr/")
+            elif article_language == "en-CA":
+                self.search_url = self.search_url.replace("/fr/", "/en/")
 
             new_url = self.search_url + query + ".json"
 
