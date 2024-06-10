@@ -247,14 +247,14 @@ class Semaphore(AIServiceBase):
                 result = {
                     "result": {
                         "tags": {
-                            "subject": [capitalize_name_if_parent_none(tag) for tag in input_data["subject"]],
-                            "organisation": [capitalize_name_if_parent_none(tag) for tag in input_data["organisation"]],
-                            "person": [capitalize_name_if_parent_none(tag) for tag in input_data["person"]],
-                            "event": [capitalize_name_if_parent_none(tag) for tag in input_data["event"]],
-                            "place": [capitalize_name_if_parent_none(tag) for tag in input_data["place"]],
+                            "subject": input_data["subject"],
+                            "organisation": input_data["organisation"],
+                            "person": input_data["person"],
+                            "event": input_data["event"],
+                            "place": input_data["place"],
                             "object": [],  # Assuming no data for 'object'
                         },
-                        "broader": {"subject": [capitalize_name_if_parent_none(tag) for tag in input_data["broader"]]},
+                        "broader": {"subject": input_data["broader"]},
                     }
                 }
 
@@ -264,7 +264,7 @@ class Semaphore(AIServiceBase):
             json_response = transform_xml_response(root, article_language)
 
             # Commenting out to disable capitalizing
-            # json_response = convert_to_desired_format(json_response)
+            json_response = convert_to_desired_format(json_response)
 
             return json_response
 
