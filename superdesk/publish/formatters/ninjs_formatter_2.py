@@ -83,26 +83,15 @@ def get_locale_name(item, language):
 
 def format_cv_item(item, language):
     """Format item from controlled vocabulary for output."""
-    if item.get("scheme") == "subject":
-        return filter_empty_vals(
-            {
-                "code": item.get("qcode"),
-                "name": get_locale_name(item, language),
-                "scheme": "http://cv.iptc.org/newscodes/mediatopic/",
-                "score": item.get("score"),
-                "creator": item.get("creator"),
-            }
-        )
-    else:
-        return filter_empty_vals(
-            {
-                "code": item.get("qcode"),
-                "name": get_locale_name(item, language),
-                "scheme": item.get("scheme"),
-                "score": item.get("score"),
-                "creator": item.get("creator"),
-            }
-        )
+    return filter_empty_vals(
+        {
+            "code": item.get("qcode"),
+            "name": get_locale_name(item, language),
+            "scheme": "http://cv.iptc.org/newscodes/mediatopic/" if item["scheme"] == "subject" else item["scheme"],
+            "relevance": item.get('relevance'),
+            "creator": item.get('creator')
+        }
+    )
 
 
 class NINJSFormatter_2(Formatter):
@@ -365,7 +354,11 @@ class NINJSFormatter_2(Formatter):
 
         # Method to Append Jimi Tags in Subjects
         self.update_ninjs_subjects(ninjs, language="en-CA")
-
+        # NOTE: ninjs formatting works fine 
+        # logger.warning(f"----------------------")
+        # logger.warning(f"Chad ninj after {ninjs}")
+        # logger.warning(f"----------------------")
+        # logger.warning(f'Chad ninjs subjects after {ninjs["subject"]}')
         return ninjs
 
     def _generate_renditions(self, article):
@@ -585,28 +578,23 @@ class NINJSFormatter_2(Formatter):
                 if item.get("in_jimi") is True:
                     name_in_vocab = item.get("name")
                     qcode = item.get("qcode")
-                    score = item.get("score")
-                    creator = item.get("creator")
                     translated_name = (
                         item.get("translations", {})
                         .get("name", {})
                         .get(language, name_in_vocab)
                     )
-                    vocab_mapping[name_in_vocab.lower()] = (qcode, translated_name, score, creator)
+                    vocab_mapping[name_in_vocab.lower()] = (qcode, translated_name)
 
             updated_subjects = list(ninjs["subject"])
 
             for subject in ninjs["subject"]:
                 subject_name = subject.get("name").lower()
                 if subject_name in vocab_mapping:
-                    qcode, translated_name, score, creator = vocab_mapping[subject_name]
                     updated_subjects.append(
                         {
                             "code": qcode,
                             "name": translated_name,
                             "scheme": "http://cv.cp.org/cp-subject-legacy/",
-                            "score": score,
-                            "creator": creator
                         }
                     )
 
