@@ -97,14 +97,7 @@ class Semaphore(AIServiceBase):
         headers = {"Authorization": f"Bearer {self.get_access_token()}"}
         try:
             frank = "?relationshipType=has%20broader"
-
             query = qcode
-
-            logger.warning("self.get_parent_url: %s", self.get_parent_url)
-
-            # If the language is French (fr-CA), replace "en" in the search_url with "fr"
-            if article_language == "fr-CA":
-                self.get_parent_url = self.get_parent_url.replace("/en/", "/fr/")
 
             parent_url = self.get_parent_url + query + frank
 
@@ -197,13 +190,12 @@ class Semaphore(AIServiceBase):
                         category = "subject"
                         scheme_url = "http://cv.iptc.org/newscodes/mediatopic/"
 
-                    score = item.get("score", ".47")
                     entry = {
                         "name": item["name"],
                         "qcode": item["id"],
                         "source": "Semaphore",
+                        "relevance": item.get("relevance", ".47"),
                         "creator": "Human",
-                        "relevance": score,
                         "altids": {"source_name": "source_id"},
                         "original_source": "original_source_value",
                         "scheme": scheme_url,
@@ -324,7 +316,7 @@ class Semaphore(AIServiceBase):
                     "event": "http://cv.cp.org/3c493189-023f-4d14-a2f4-fc7b79735ffc",
                 }
                 id_value = scheme_id_map.get(scheme, "")
-
+                # TODO: Once the payload structure is renewed visit this to add relevance and creator
                 payload = json.dumps(
                     {
                         "@type": ["skos:Concept"],
@@ -458,6 +450,7 @@ class Semaphore(AIServiceBase):
                         meta_name = element.get("name")
                         meta_value = element.get("value")
                         meta_score = element.get("score", "0")
+                        logger.warning(f"Chad meta_score {meta_score}")
                         meta_id = element.get("id")
 
                         # Adjust score if necessary to avoid duplicates
@@ -505,11 +498,12 @@ class Semaphore(AIServiceBase):
                                     "original_source": "original_source_value",
                                     "scheme": scheme_url,
                                 }
+                                logger.warning(f"Chad tag_data {tag_data}")
                                 add_to_dict(group, tag_data)
 
                 # Match path labels with path GUIDs based on scores
-                for score, labels in path_labels.items():
-                    guids = path_guids.get(score, [])
+                for relevance, labels in path_labels.items():
+                    guids = path_guids.get(relevance, [])
                     if len(labels) != len(guids):
                         continue  # Skip if there's a mismatch in the number of labels and GUIDs
 
@@ -521,11 +515,12 @@ class Semaphore(AIServiceBase):
                             "parent": parent_qcode,
                             "source": "Semaphore",
                             "creator": "Machine",
-                            "relevance": score,
+                            "relevance": relevance,
                             "altids": {"source_name": "source_id"},
                             "original_source": "original_source_value",
                             "scheme": "http://cv.iptc.org/newscodes/mediatopic/",
                         }
+                        logger.warning(f"Chad tag_data subject {tag_data}")
                         add_to_dict("subject", tag_data)
                         parent_qcode = guid  # Update the parent qcode for the next iteration
 
