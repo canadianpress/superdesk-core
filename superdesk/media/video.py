@@ -8,11 +8,14 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
+import os
+from typing import Any
 from hachoir.stream import InputIOStream
 from hachoir.parser import guessParser
 from hachoir.metadata import extractMetadata
 from flask import json
 import logging
+from superdesk.media.image import PhotoMetadata
 
 
 logger = logging.getLogger(__name__)
@@ -42,3 +45,130 @@ def get_meta(filestream):
         logger.exception(ex)
         return metadata
     return metadata
+
+
+def read_metadata(input: bytes) -> dict[str, Any]:
+    """Read xmp metadata with exiftool
+
+    @param input: bytes
+    """
+
+    import tempfile
+    from exiftool import ExifToolHelper  # type: ignore
+    from exiftool.exceptions import ExifToolException  # type: ignore
+
+    with tempfile.NamedTemporaryFile(delete=True) as temp:
+        temp.write(input)
+        temp.flush()
+
+        try:
+            with ExifToolHelper() as et:
+                raw_metadata = et.get_metadata(temp.name, ["-xmp:all"])[0]
+                metadata = {k.replace("XMP:", ""): v for k, v in raw_metadata.items()}
+                return metadata
+        except ExifToolException as e:
+            logger.exception(e.stderr)
+            return {}
+
+
+def write_metadata(input: bytes, metadata: PhotoMetadata):
+    """Write XMP metadata to video from PhotoMetadata item
+
+    @param input: bytes
+    @param metadata: PhotoMetadata
+    """
+
+    args = convert_xmp_to_args(get_xmp_tags_from_item(metadata))
+    return write_xmp_with_exiftool(input, args)
+
+
+def get_xmp_tags_from_item(metadata: PhotoMetadata):
+    """Get XMP tags for exiftool from PhotoMetadata item
+
+    @param metadata: PhotoMetadata
+    """
+
+    xmp = {
+        "Description": metadata.get("Description"),
+        "CaptionWriter": metadata.get("DescriptionWriter"),
+        "Headline": metadata.get("Headline"),
+        "Instructions": metadata.get("Instructions"),
+        "TransmissionReference": metadata.get("JobId"),
+        "Title": metadata.get("Title"),
+        "Creator": metadata.get("Creator"),
+        "AuthorsPosition": metadata.get("CreatorsJobtitle"),
+        "Rights": metadata.get("CopyrightNotice"),
+        "City": metadata.get("City"),
+        "Country": metadata.get("Country"),
+        "CountryCode": metadata.get("CountryCode"),
+        "Credit": metadata.get("CreditLine"),
+        "State": metadata.get("ProvinceState"),
+    }
+    xmp = {k: v for k, v in xmp.items() if v}
+    return xmp
+
+
+def get_xmp_tags_from_exif(metadata: dict[str, Any]):
+    """Get XMP tags for exiftool from raw metadata output from exiftool
+
+    @param metadata: dict[str, Any]
+    """
+
+    xmp = {
+        "Description": metadata.get("Description"),
+        "CaptionWriter": metadata.get("CaptionWriter"),
+        "Headline": metadata.get("Headline"),
+        "Instructions": metadata.get("Instructions"),
+        "TransmissionReference": metadata.get("TransmissionReference"),
+        "Title": metadata.get("Title"),
+        "Creator": metadata.get("Creator"),
+        "AuthorsPosition": metadata.get("AuthorsPosition"),
+        "Rights": metadata.get("Rights"),
+        "City": metadata.get("City"),
+        "Country": metadata.get("Country"),
+        "CountryCode": metadata.get("CountryCode"),
+        "Credit": metadata.get("Credit"),
+        "State": metadata.get("State"),
+    }
+    xmp = {k: v for k, v in xmp.items() if v}
+    return xmp
+
+
+def convert_xmp_to_args(xmp: dict[str, Any]):
+    """Convert XMP tags to exiftool args
+
+    @param xmp: dict[str, Any]
+    """
+
+    args = [f"-{key}={value}" for key, value in xmp.items()]
+    args.append("-overwrite_original")
+    return args
+
+
+def write_xmp_with_exiftool(original: bytes, args: dict[str, Any]):
+    """Write xmp tags to temp file using exiftool
+
+    @param original: bytes
+    @param args: dict[str, Any]
+    """
+
+    import tempfile
+    from exiftool import ExifToolHelper
+    from exiftool.exceptions import ExifToolExecuteError
+
+    with tempfile.NamedTemporaryFile(delete=False) as temp:
+        temp.write(original)
+        temp.flush()
+        temp_path = temp.name
+
+    try:
+        with ExifToolHelper() as et:
+            et.execute(*args, temp_path)
+
+        with open(temp_path, "rb") as updated:
+            return updated.read()
+    except ExifToolExecuteError as e:
+        logger.exception(e.stderr)
+        return original
+    finally:
+        os.remove(temp_path)
