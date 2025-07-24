@@ -71,14 +71,14 @@ def read_metadata(input: bytes) -> dict[str, Any]:
             return {}
 
 
-def write_metadata(input: bytes, metadata: PhotoMetadata):
+def write_metadata(input: bytes, metadata: dict[str, Any]):
     """Write XMP metadata to video from PhotoMetadata item
 
     @param input: bytes
     @param metadata: PhotoMetadata
     """
 
-    args = convert_xmp_to_args(get_xmp_tags_from_item(metadata))
+    args = convert_xmp_to_args(metadata)
     return write_xmp_with_exiftool(input, args)
 
 
