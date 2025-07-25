@@ -83,28 +83,56 @@ def write_metadata(input: bytes, metadata: dict[str, Any]):
 
 
 def get_xmp_tags_from_item(metadata: PhotoMetadata):
-    """Get XMP tags for exiftool from PhotoMetadata item
+    """Get known XMP tags and all unknown truthy tags (custom)
 
     @param metadata: PhotoMetadata
     """
 
     xmp = {
-        "Description": metadata.get("Description"),
-        "CaptionWriter": metadata.get("DescriptionWriter"),
+        "Description": metadata.get("Caption-Abstract"),
+        "CaptionWriter": metadata.get("Writer-Editor"),
         "Headline": metadata.get("Headline"),
-        "Instructions": metadata.get("Instructions"),
-        "TransmissionReference": metadata.get("JobId"),
-        "Title": metadata.get("Title"),
-        "Creator": metadata.get("Creator"),
-        "AuthorsPosition": metadata.get("CreatorsJobtitle"),
+        "Instructions": metadata.get("SpecialInstructions"),
+        "TransmissionReference": metadata.get("OriginalTransmissionReference"),
+        "Title": metadata.get("ObjectName"),
+        "Creator": metadata.get("By-line"),
+        "AuthorsPosition": metadata.get("By-lineTitle"),
         "Rights": metadata.get("CopyrightNotice"),
         "City": metadata.get("City"),
-        "Country": metadata.get("Country"),
-        "CountryCode": metadata.get("CountryCode"),
-        "Credit": metadata.get("CreditLine"),
-        "State": metadata.get("ProvinceState"),
+        "Country": metadata.get("Country-PrimaryLocationName"),
+        "CountryCode": metadata.get("Country-PrimaryLocationCode"),
+        "Credit": metadata.get("Credit"),
+        "State": metadata.get("Province-State"),
+        "Location": metadata.get("Sub-location"),
+        "CreatorContactInfo": metadata.get("Contact"),
+        "Language": metadata.get("LanguageIdentifier"),
+        "Destination": metadata.get("Destination"),
+        "ServiceIdentifier": metadata.get("ServiceIdentifier"),
+        "ProductID": metadata.get("ProductID"),
+        "DateSent": metadata.get("DateSent"),
+        "TimeSent": metadata.get("TimeSent"),
+        "EditStatus": metadata.get("EditStatus"),
+        "Urgency": metadata.get("Urgency"),
+        "SubjectCode": metadata.get("SubjectReference"),
+        "Category": metadata.get("Category"),
+        "SupplementalCategories": metadata.get("SupplementalCategories"),
+        "Subject": metadata.get("Keywords"),
+        "LocationCode": metadata.get("ContentLocationCode"),
+        "LocationName": metadata.get("ContentLocationName"),
+        "ReleaseDate": metadata.get("ReleaseDate"),
+        "ReleaseTime": metadata.get("ReleaseTime"),
+        "ExpirationDate": metadata.get("ExpirationDate"),
+        "ExpirationTime": metadata.get("ExpirationTime"),
+        "TimeCreated": metadata.get("TimeCreated"),
+        "Source": metadata.get("Source"),
+        **(
+            {"DateCreated": f"{metadata['DateCreated']}T{metadata['TimeCreated']}"}
+            if metadata.get("DateCreated") and metadata.get("TimeCreated")
+            else {}
+        ),
     }
-    xmp = {k: v for k, v in xmp.items() if v}
+    xmp = {k: vv for k, v in xmp.items() if (vv := v or metadata.get(k))}
+    xmp.update({k: v for k, v in metadata.items() if k not in xmp and v})
     return xmp
 
 
