@@ -285,11 +285,14 @@ def read_metadata(input: bytes) -> PhotoMetadata:
         xmp = img.read_xmp()
     return {
         "Description": get_xmp_lang_string(xmp.get("Xmp.dc.description")),
+        "Caption-Abstract": get_xmp_lang_string(xmp.get("Xmp.dc.description")),
         "DescriptionWriter": xmp.get("Xmp.photoshop.CaptionWriter", ""),
         "Headline": xmp.get("Xmp.photoshop.Headline", ""),
         "Instructions": xmp.get("Xmp.photoshop.Instructions", ""),
         "JobId": xmp.get("Xmp.photoshop.TransmissionReference", ""),
+        "OriginalTransmissionReference": xmp.get("Xmp.photoshop.TransmissionReference", ""),
         "Title": get_xmp_lang_string(xmp.get("Xmp.dc.title")),
+        "ObjectName": get_xmp_lang_string(xmp.get("Xmp.dc.title")),
         "Creator": xmp.get("Xmp.dc.creator", []),
         "CreatorsJobtitle": xmp.get("Xmp.photoshop.AuthorsPosition", ""),
         "CopyrightNotice": get_xmp_lang_string(xmp.get("Xmp.dc.rights", "")),
@@ -319,12 +322,12 @@ def write_metadata(input: bytes, metadata: PhotoMetadata) -> bytes:
     from pyexiv2 import convert_xmp_to_iptc
 
     xmp = {
-        "Xmp.dc.description": metadata.get("Description"),
+        "Xmp.dc.description": metadata.get("Description", metadata.get("Caption-Abstract")),
         "Xmp.photoshop.CaptionWriter": metadata.get("DescriptionWriter"),
         "Xmp.photoshop.Headline": metadata.get("Headline"),
         "Xmp.photoshop.Instructions": metadata.get("Instructions"),
-        "Xmp.photoshop.TransmissionReference": metadata.get("JobId"),
-        "Xmp.dc.title": metadata.get("Title"),
+        "Xmp.photoshop.TransmissionReference": metadata.get("JobId", metadata.get("OriginalTransmissionReference")),
+        "Xmp.dc.title": metadata.get("Title", metadata.get("ObjectName")),
         "Xmp.dc.creator": metadata.get("Creator"),
         "Xmp.photoshop.AuthorsPosition": metadata.get("CreatorsJobtitle"),
         "Xmp.dc.rights": metadata.get("CopyrightNotice"),
