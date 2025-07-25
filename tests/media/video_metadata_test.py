@@ -68,6 +68,7 @@ def test_picture_metadata_read_write_from_video(video_binary) -> None:
 def test_picture_metadata_read_from_image(image_binary) -> None:
     metadata = {
         "Description": "The Montreal Police logo is seen on a police car in Montreal on Wednesday, July 8, 2020. THE CANADIAN PRESS/Paul Chiasson",
+        "Caption-Abstract": "The Montreal Police logo is seen on a police car in Montreal on Wednesday, July 8, 2020. THE CANADIAN PRESS/Paul Chiasson",
         "DescriptionWriter": "pch",
         "City": "Montreal",
         "Country": "Canada",
@@ -75,8 +76,11 @@ def test_picture_metadata_read_from_image(image_binary) -> None:
         "Creator": ["Paul Chiasson"],
         "CreatorsJobtitle": "stf",
         "JobId": "DPI755",
+        "OriginalTransmissionReference": "DPI755",
+        "TransmissionReference": "DPI755",
         "Instructions": "EDS NOTE:A FILE PHOTO",
         "Title": "MORT PIÉTONNE MONTRÉAL 20201014",
+        "ObjectName": "MORT PIÉTONNE MONTRÉAL 20201014",
         "CreditLine": "The Canadian Press",
         "ProvinceState": "PQ",
     }
