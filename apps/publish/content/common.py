@@ -45,14 +45,14 @@ from superdesk.utc import utcnow
 from superdesk.workflow import is_workflow_state_transition_valid
 from superdesk.validation import ValidationError
 from superdesk.media.image import (
-    get_metadata_from_item,
+    get_metadata_from_item as get_image_metadata_from_item,
     read_metadata as image_read_metadata,
     write_metadata as image_write_metadata,
 )
 from superdesk.media.video import (
     write_metadata as video_write_metadata,
     read_metadata as video_read_metadata,
-    get_xmp_tags_from_item,
+    get_metadata_from_item as get_video_metadata_from_item,
 )
 
 
@@ -1010,9 +1010,9 @@ class BasePublishService(BaseService):
                     video_read_metadata(binary) if updated[ITEM_TYPE] == "video" else image_read_metadata(binary)
                 )
                 metadata = (
-                    get_xmp_tags_from_item(get_metadata_from_item(updated, mapping))
+                    get_video_metadata_from_item(get_image_metadata_from_item(updated, mapping))
                     if updated[ITEM_TYPE] == "video"
-                    else get_metadata_from_item(updated, mapping)
+                    else get_image_metadata_from_item(updated, mapping)
                 )
                 should_update = any(metadata[k] != file_metadata[k] for k in metadata)
 

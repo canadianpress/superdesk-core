@@ -1,10 +1,11 @@
 from pytest import fixture
 from superdesk.media.video import (
+    VideoMetadata,
     read_metadata as read_video_metadata,
-    get_xmp_tags_from_exif,
-    convert_xmp_to_args,
+    get_metadata_from_exiftool,
+    map_xmp_to_exiftool_args,
     write_xmp_with_exiftool,
-    get_xmp_tags_from_item,
+    get_metadata_from_item,
 )
 from superdesk.media.image import read_metadata as read_image_metadata
 
@@ -26,10 +27,7 @@ def video_binary() -> bytes:
 
 
 def test_picture_metadata_read_write_from_video(video_binary) -> None:
-    metadata = read_video_metadata(video_binary)
-    xmp = get_xmp_tags_from_exif(metadata)
-
-    assert xmp == {
+    assert get_metadata_from_exiftool(read_video_metadata(video_binary)) == {
         "Description": "Your Description Here",
         "Headline": "Your Headline",
         "City": "Your City",
@@ -46,7 +44,7 @@ def test_picture_metadata_read_write_from_video(video_binary) -> None:
         "CaptionWriter": "Your Caption Writer",
     }
 
-    updated = {
+    updated: VideoMetadata = {
         "Description": "Your Description Here 1",
         "Headline": "Your Headline 2",
         "City": "Your City 3",
@@ -62,19 +60,13 @@ def test_picture_metadata_read_write_from_video(video_binary) -> None:
         "State": "Your Province or State 13",
         "CaptionWriter": "Your Caption Writer 14",
     }
-    args = convert_xmp_to_args(updated)
-    next_video = write_xmp_with_exiftool(video_binary, args)
-    next_metadata = read_video_metadata(next_video)
-    next_xmp = get_xmp_tags_from_exif(next_metadata)
-
-    assert next_xmp == updated
+    next_video = write_xmp_with_exiftool(video_binary, map_xmp_to_exiftool_args(updated))
+    next = get_metadata_from_exiftool(read_video_metadata(next_video))
+    assert next == updated
 
 
 def test_picture_metadata_read_from_image(image_binary) -> None:
-    metadata = read_image_metadata(image_binary)
-    xmp = get_xmp_tags_from_item(metadata)
-
-    assert xmp == {
+    metadata = {
         "Description": "The Montreal Police logo is seen on a police car in Montreal on Wednesday, July 8, 2020. THE CANADIAN PRESS/Paul Chiasson",
         "DescriptionWriter": "pch",
         "City": "Montreal",
@@ -88,3 +80,4 @@ def test_picture_metadata_read_from_image(image_binary) -> None:
         "CreditLine": "The Canadian Press",
         "ProvinceState": "PQ",
     }
+    assert get_metadata_from_item(read_image_metadata(image_binary)) == metadata
