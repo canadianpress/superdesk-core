@@ -1014,7 +1014,7 @@ class BasePublishService(BaseService):
                     if updated[ITEM_TYPE] == "video"
                     else get_image_metadata_from_item(updated, mapping)
                 )
-                should_update = any(metadata[k] != file_metadata[k] for k in metadata)
+                should_update = any(metadata[k] != file_metadata.get(k) for k in metadata)
 
                 if not should_update:
                     continue

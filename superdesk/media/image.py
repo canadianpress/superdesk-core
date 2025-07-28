@@ -13,7 +13,7 @@
 import io
 import logging
 
-from typing import BinaryIO, Dict, List, Literal, Mapping, TypedDict, Union
+from typing import BinaryIO, Dict, List, Literal, TypedDict, Union
 
 from superdesk.text_utils import decode
 from PIL import Image, ExifTags
@@ -22,7 +22,7 @@ from PIL.TiffImagePlugin import IFDRational
 from flask import json
 
 from superdesk.types import Item
-from .iim_codes import TAG, iim_codes
+from .iim_codes import iim_codes
 
 logger = logging.getLogger(__name__)
 
@@ -166,60 +166,21 @@ def get_meta_iptc(file_stream: BinaryIO):
     return metadata
 
 
-PhotoMetadata = TypedDict(
-    "PhotoMetadata",
-    {
-        "Description": str | None,
-        "DescriptionWriter": str | None,
-        "Headline": str | None,
-        "Instructions": str | None,
-        "JobId": str | None,
-        "Title": str | None,
-        "Creator": List[str] | None,
-        "CreatorsJobtitle": str | None,
-        "City": str | None,
-        "ProvinceState": str | None,
-        "Country": str | None,
-        "CountryCode": str | None,
-        "CopyrightNotice": str | None,
-        "CreditLine": str | None,
-        "Destination": str | None,
-        "ServiceIdentifier": str | None,
-        "ProductID": str | None,
-        "DateSent": str | None,
-        "TimeSent": str | None,
-        "ObjectName": str | None,
-        "EditStatus": str | None,
-        "Urgency": str | None,
-        "SubjectReference": str | None,
-        "Category": str | None,
-        "SupplementalCategories": str | None,
-        "Keywords": str | None,
-        "ContentLocationCode": str | None,
-        "ContentLocationName": str | None,
-        "ReleaseDate": str | None,
-        "ReleaseTime": str | None,
-        "ExpirationDate": str | None,
-        "ExpirationTime": str | None,
-        "SpecialInstructions": str | None,
-        "DateCreated": str | None,
-        "TimeCreated": str | None,
-        "By-line": str | None,
-        "By-lineTitle": str | None,
-        "Sub-location": str | None,
-        "Province-State": str | None,
-        "Country-PrimaryLocationCode": str | None,
-        "Country-PrimaryLocationName": str | None,
-        "OriginalTransmissionReference": str | None,
-        "Credit": str | None,
-        "Source": str | None,
-        "Contact": str | None,
-        "Caption-Abstract": str | None,
-        "Writer-Editor": str | None,
-        "LanguageIdentifier": str | None,
-    },
-    total=False,
-)
+class PhotoMetadata(TypedDict, total=False):
+    Description: str
+    DescriptionWriter: str
+    Headline: str
+    Instructions: str
+    JobId: str
+    Title: str
+    Creator: List[str]
+    CreatorsJobtitle: str
+    City: str
+    ProvinceState: str
+    Country: str
+    CountryCode: str
+    CopyrightNotice: str
+    CreditLine: str
 
 
 PhotoMetadataKeys = Literal[
@@ -237,40 +198,6 @@ PhotoMetadataKeys = Literal[
     "CountryCode",
     "CopyrightNotice",
     "CreditLine",
-    "Destination",
-    "ServiceIdentifier",
-    "ProductID",
-    "DateSent",
-    "TimeSent",
-    "ObjectName",
-    "EditStatus",
-    "Urgency",
-    "SubjectReference",
-    "Category",
-    "SupplementalCategories",
-    "Keywords",
-    "ContentLocationCode",
-    "ContentLocationName",
-    "ReleaseDate",
-    "ReleaseTime",
-    "ExpirationDate",
-    "ExpirationTime",
-    "SpecialInstructions",
-    "DateCreated",
-    "TimeCreated",
-    "By-line",
-    "By-lineTitle",
-    "Sub-location",
-    "Province-State",
-    "Country-PrimaryLocationCode",
-    "Country-PrimaryLocationName",
-    "OriginalTransmissionReference",
-    "Credit",
-    "Source",
-    "Contact",
-    "Caption-Abstract",
-    "Writer-Editor",
-    "LanguageIdentifier",
 ]
 
 PhotoMetadataMapping = Dict[str, PhotoMetadataKeys]
@@ -285,14 +212,11 @@ def read_metadata(input: bytes) -> PhotoMetadata:
         xmp = img.read_xmp()
     return {
         "Description": get_xmp_lang_string(xmp.get("Xmp.dc.description")),
-        "Caption-Abstract": get_xmp_lang_string(xmp.get("Xmp.dc.description")),
         "DescriptionWriter": xmp.get("Xmp.photoshop.CaptionWriter", ""),
         "Headline": xmp.get("Xmp.photoshop.Headline", ""),
         "Instructions": xmp.get("Xmp.photoshop.Instructions", ""),
         "JobId": xmp.get("Xmp.photoshop.TransmissionReference", ""),
-        "OriginalTransmissionReference": xmp.get("Xmp.photoshop.TransmissionReference", ""),
         "Title": get_xmp_lang_string(xmp.get("Xmp.dc.title")),
-        "ObjectName": get_xmp_lang_string(xmp.get("Xmp.dc.title")),
         "Creator": xmp.get("Xmp.dc.creator", []),
         "CreatorsJobtitle": xmp.get("Xmp.photoshop.AuthorsPosition", ""),
         "CopyrightNotice": get_xmp_lang_string(xmp.get("Xmp.dc.rights", "")),
@@ -322,12 +246,12 @@ def write_metadata(input: bytes, metadata: PhotoMetadata) -> bytes:
     from pyexiv2 import convert_xmp_to_iptc
 
     xmp = {
-        "Xmp.dc.description": metadata.get("Description", metadata.get("Caption-Abstract")),
+        "Xmp.dc.description": metadata.get("Description"),
         "Xmp.photoshop.CaptionWriter": metadata.get("DescriptionWriter"),
         "Xmp.photoshop.Headline": metadata.get("Headline"),
         "Xmp.photoshop.Instructions": metadata.get("Instructions"),
-        "Xmp.photoshop.TransmissionReference": metadata.get("JobId", metadata.get("OriginalTransmissionReference")),
-        "Xmp.dc.title": metadata.get("Title", metadata.get("ObjectName")),
+        "Xmp.photoshop.TransmissionReference": metadata.get("JobId"),
+        "Xmp.dc.title": metadata.get("Title"),
         "Xmp.dc.creator": metadata.get("Creator"),
         "Xmp.photoshop.AuthorsPosition": metadata.get("CreatorsJobtitle"),
         "Xmp.dc.rights": metadata.get("CopyrightNotice"),

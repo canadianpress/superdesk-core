@@ -9,7 +9,7 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 import os
-from typing import List, Mapping, TypedDict, cast
+from typing import Any, List, Mapping, TypedDict, cast
 from hachoir.stream import InputIOStream
 from hachoir.parser import guessParser
 from hachoir.metadata import extractMetadata
@@ -56,7 +56,7 @@ VideoMetadata = TypedDict(
         "Instructions": str | None,
         "TransmissionReference": str | None,
         "Title": str | None,
-        "Creator": str | None,
+        "Creator": List[str] | str | None,
         "AuthorsPosition": str | None,
         "Rights": str | None,
         "City": str | None,
@@ -103,7 +103,7 @@ def read_metadata(input: bytes) -> VideoMetadata:
 
         try:
             with ExifToolHelper() as et:
-                raw_metadata: Mapping[str, str] = et.get_metadata(temp.name, ["-xmp:all"])[0]
+                raw_metadata: Mapping[str, Any] = et.get_metadata(temp.name, ["-xmp:all"])[0]
                 metadata = {k.replace("XMP:", ""): v for k, v in raw_metadata.items()}
                 return cast(VideoMetadata, metadata)
         except ExifToolException as e:
@@ -117,26 +117,26 @@ def write_metadata(input: bytes, metadata: VideoMetadata):
 
 
 def get_metadata_from_item(metadata: PhotoMetadata) -> VideoMetadata:
-    """Get XMP and truthy custom tags
+    """Get XMP from IPTC and truthy custom tags
 
     @param metadata: PhotoMetadata
     """
 
     xmp = {
-        "Description": metadata.get("Caption-Abstract"),
-        "CaptionWriter": metadata.get("Writer-Editor"),
+        "Description": metadata.get("Caption-Abstract", metadata.get("Description")),
+        "CaptionWriter": metadata.get("Writer-Editor", metadata.get("DescriptionWriter")),
         "Headline": metadata.get("Headline"),
-        "Instructions": metadata.get("SpecialInstructions"),
-        "TransmissionReference": metadata.get("OriginalTransmissionReference"),
-        "Title": metadata.get("ObjectName"),
-        "Creator": metadata.get("By-line"),
-        "AuthorsPosition": metadata.get("By-lineTitle"),
+        "Instructions": metadata.get("SpecialInstructions", metadata.get("Instructions")),
+        "TransmissionReference": metadata.get("OriginalTransmissionReference", metadata.get("JobId")),
+        "Title": metadata.get("ObjectName", metadata.get("Title")),
+        "Creator": metadata.get("By-line", metadata.get("Creator")),
+        "AuthorsPosition": metadata.get("By-lineTitle", metadata.get("CreatorsJobtitle")),
         "Rights": metadata.get("CopyrightNotice"),
         "City": metadata.get("City"),
-        "Country": metadata.get("Country-PrimaryLocationName"),
-        "CountryCode": metadata.get("Country-PrimaryLocationCode"),
-        "Credit": metadata.get("Credit"),
-        "State": metadata.get("Province-State"),
+        "Country": metadata.get("Country-PrimaryLocationName", metadata.get("Country")),
+        "CountryCode": metadata.get("Country-PrimaryLocationCode", metadata.get("CountryCode")),
+        "Credit": metadata.get("Credit", metadata.get("CreditLine")),
+        "State": metadata.get("Province-State", metadata.get("ProvinceState")),
         "Location": metadata.get("Sub-location"),
         "CreatorContactInfo": metadata.get("Contact"),
         "Language": metadata.get("LanguageIdentifier"),
@@ -160,13 +160,12 @@ def get_metadata_from_item(metadata: PhotoMetadata) -> VideoMetadata:
         "TimeCreated": metadata.get("TimeCreated"),
         "Source": metadata.get("Source"),
         **(
-            {"DateCreated": f"{metadata['DateCreated']}T{metadata['TimeCreated']}"}
+            {"DateCreated": f"{metadata.get('DateCreated')}T{metadata.get('TimeCreated')}"}
             if metadata.get("DateCreated") and metadata.get("TimeCreated")
             else {}
         ),
     }
     tags = {k: vv for k, v in xmp.items() if (vv := v or metadata.get(k))}
-    tags.update({k: v for k, v in metadata.items() if k not in xmp and v})
     return cast(VideoMetadata, tags)
 
 
@@ -192,7 +191,8 @@ def get_metadata_from_exiftool(metadata: VideoMetadata) -> VideoMetadata:
 
 
 def map_xmp_to_exiftool_args(xmp: VideoMetadata):
-    args = [f"-{key}={value}" for key, value in xmp.items()]
+    args = ["-sep", ","]
+    args.extend(f"-{k}={','.join(v) if isinstance(v, list) else v}" for k, v in xmp.items())
     args.append("-overwrite_original")
     return args
 

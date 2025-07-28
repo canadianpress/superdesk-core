@@ -27,7 +27,6 @@ def test_picture_metadata_read_write(image_binary) -> None:
     assert metadata == PhotoMetadata(
         {
             "Description": "The Montreal Police logo is seen on a police car in Montreal on Wednesday, July 8, 2020. THE CANADIAN PRESS/Paul Chiasson",
-            "Caption-Abstract": "The Montreal Police logo is seen on a police car in Montreal on Wednesday, July 8, 2020. THE CANADIAN PRESS/Paul Chiasson",
             "DescriptionWriter": "pch",
             "Headline": "",
             "City": "Montreal",
@@ -36,10 +35,8 @@ def test_picture_metadata_read_write(image_binary) -> None:
             "Creator": ["Paul Chiasson"],
             "CreatorsJobtitle": "stf",
             "JobId": "DPI755",
-            "OriginalTransmissionReference": "DPI755",
             "Instructions": "EDS NOTE:A FILE PHOTO",
             "Title": "MORT PIÉTONNE MONTRÉAL 20201014",
-            "ObjectName": "MORT PIÉTONNE MONTRÉAL 20201014",
             "CopyrightNotice": "",
             "CreditLine": "The Canadian Press",
             "ProvinceState": "PQ",
@@ -49,7 +46,6 @@ def test_picture_metadata_read_write(image_binary) -> None:
     updated = PhotoMetadata(
         {
             "Description": "description",
-            "Caption-Abstract": "description",
             "DescriptionWriter": "description writer",
             "Headline": "headline",
             "City": "city",
@@ -58,10 +54,8 @@ def test_picture_metadata_read_write(image_binary) -> None:
             "Creator": ["creator"],
             "CreatorsJobtitle": "creators jobtitle",
             "JobId": "jobid",
-            "OriginalTransmissionReference": "jobid",
             "Instructions": "instructions",
             "Title": "title",
-            "ObjectName": "title",
             "CopyrightNotice": "notice",
             "CreditLine": "credit",
             "ProvinceState": "state",
