@@ -8,13 +8,13 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
-from typing import Any, TypedDict
+from typing import Any
 from hachoir.stream import InputIOStream
 from hachoir.parser import guessParser
 from hachoir.metadata import extractMetadata
 from flask import json
 import logging
-from superdesk.media.image import PhotoMetadata
+from superdesk.media.metadata_mapping import MediaMetadata, MediaMetadataKeys
 
 
 logger = logging.getLogger(__name__)
@@ -46,82 +46,39 @@ def get_meta(filestream):
     return metadata
 
 
-class VideoMetadata(TypedDict, total=False):
-    Description: str | None
-    CaptionWriter: str | None
-    Headline: str | None
-    Instructions: str | None
-    TransmissionReference: str | None
-    Title: str | None
-    Creator: list[str] | str | None
-    AuthorsPosition: str | None
-    Rights: str | None
-    City: str | None
-    Country: str | None
-    CountryCode: str | None
-    Credit: str | None
-    State: str | None
-    Location: str | None
-    CreatorContactInfo: str | None
-    Language: str | None
-    Destination: str | None
-    ServiceIdentifier: str | None
-    ProductID: str | None
-    DateSent: str | None
-    TimeSent: str | None
-    EditStatus: str | None
-    Urgency: str | None
-    SubjectCode: str | None
-    Category: str | None
-    SupplementalCategories: str | None
-    Subject: str | None
-    LocationCode: str | None
-    LocationName: str | None
-    ReleaseDate: str | None
-    ReleaseTime: str | None
-    ExpirationDate: str | None
-    ExpirationTime: str | None
-    TimeCreated: str | None
-    Source: str | None
-    DateCreated: str | None
-
-
-VideoMetadataKeys = set(VideoMetadata.__annotations__.keys())
-
-
 def read_with_exiftool(bin: bytes) -> dict[str, Any]:
-    import tempfile
+    from tempfile import NamedTemporaryFile
     from exiftool import ExifToolHelper  # type: ignore
-    from exiftool.exceptions import ExifToolException  # type: ignore
+    from exiftool.exceptions import ExifToolExecuteError  # type: ignore
 
-    with tempfile.NamedTemporaryFile(delete=True) as tmp:
+    with NamedTemporaryFile(delete=True) as tmp:
         tmp.write(bin)
         tmp.flush()
 
         try:
             with ExifToolHelper() as et:
                 return et.get_metadata(tmp.name, ["-xmp:all"])[0]
-        except ExifToolException as e:
+        except ExifToolExecuteError as e:
             logger.exception(e.stderr)
             return {}
 
 
-def read_metadata(bin: bytes) -> VideoMetadata:
+def read_metadata(bin: bytes) -> MediaMetadata:
     from typing import cast
 
     raw_metadata = read_with_exiftool(bin)
-    metadata = {kk: v for k, v in raw_metadata.items() if v and (kk := k.replace("XMP:", "")) in VideoMetadataKeys}
-    return cast(VideoMetadata, metadata)
+    metadata = {kk: v for k, v in raw_metadata.items() if v and (kk := k.replace("XMP:", "")) in MediaMetadataKeys}
+    return cast(MediaMetadata, metadata)
 
 
-def write_metadata(bin: bytes, video: VideoMetadata) -> bytes:
+def write_metadata(bin: bytes, video: MediaMetadata) -> bytes:
     return write_with_exiftool(bin, map_exiftool_args(video))
 
 
-def get_video_from_photo(photo: PhotoMetadata) -> VideoMetadata:
+def get_video_from_photo(photo: MediaMetadata) -> MediaMetadata:
     """Get XMP from IPTC and truthy custom tags
 
-    @param metadata: PhotoMetadata
+    @param photo: Metadata
     """
 
     from typing import cast
@@ -170,35 +127,30 @@ def get_video_from_photo(photo: PhotoMetadata) -> VideoMetadata:
         ),
     }
     tags = {k: vv for k, v in xmp.items() if (vv := v or photo.get(k))}
-    return cast(VideoMetadata, tags)
+    return cast(MediaMetadata, tags)
 
 
-def map_exiftool_args(video: VideoMetadata) -> list[str]:
+def map_exiftool_args(video: MediaMetadata) -> list[str]:
     args = ["-sep", ","]
     args.extend(f"-{k}={','.join(v) if isinstance(v, list) else v}" for k, v in video.items())
-    args.append("-overwrite_original")
+    args.append("-overwrite_original_in_place")
     return args
 
 
 def write_with_exiftool(bin: bytes, args: list[str]) -> bytes:
-    import tempfile
+    from tempfile import NamedTemporaryFile
     from exiftool import ExifToolHelper
     from exiftool.exceptions import ExifToolExecuteError
-    from os import remove
-
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        tmp.write(bin)
-        tmp.flush()
-        path = tmp.name
 
     try:
-        with ExifToolHelper() as et:
-            et.execute(*args, path)
+        with NamedTemporaryFile() as tmp:
+            tmp.write(bin)
+            tmp.flush()
+            with ExifToolHelper() as et:
+                et.execute(*args, tmp.name)
 
-        with open(path, "rb") as r:
-            return r.read()
+            tmp.seek(0)
+            return tmp.read()
     except ExifToolExecuteError as e:
-        logger.exception(e.stderr)
+        logger.exception("ExifTool write failed: %s", e)
         return bin
-    finally:
-        remove(path)

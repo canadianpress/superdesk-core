@@ -59,19 +59,20 @@ def test_read_metadata(read_with_exiftool, video_binary) -> None:
 
 
 def test_map_exiftool_args() -> None:
-    from superdesk.media.video import VideoMetadata, map_exiftool_args
+    from superdesk.media.metadata_mapping import MediaMetadata
+    from superdesk.media.video import map_exiftool_args
 
-    video: VideoMetadata = {"Creator": ["Phil", "Harvey"]}
-    expected = ["-sep", ",", "-Creator=Phil,Harvey", "-overwrite_original"]
+    video: MediaMetadata = {"Creator": ["Phil", "Harvey"]}
+    expected = ["-sep", ",", "-Creator=Phil,Harvey", "-overwrite_original_in_place"]
 
     assert map_exiftool_args(video) == expected
 
 
 def test_get_video_from_photo() -> None:
-    from superdesk.media.image import PhotoMetadata
+    from superdesk.media.metadata_mapping import MediaMetadata
     from superdesk.media.video import get_video_from_photo
 
-    photo: PhotoMetadata = {
+    photo: MediaMetadata = {
         "Description": (
             "The Montreal Police logo is seen on "
             "a police car in Montreal on Wednesday, July 8, 2020. "
@@ -115,31 +116,25 @@ def test_get_video_from_photo() -> None:
 
 @patch("tempfile.NamedTemporaryFile")
 @patch("exiftool.ExifToolHelper")
-@patch("builtins.open")
-@patch("os.remove")
-def test_write_with_exiftool(rm, open, et, tempfile, video_binary, video_updated_binary) -> None:
+def test_write_with_exiftool(et, tempfile, video_binary, video_updated_binary) -> None:
     from unittest.mock import MagicMock
 
     tmp = MagicMock()
     tmp.name = "test.mp4"
+    tmp.read.return_value = video_updated_binary
     tempfile.return_value.__enter__.return_value = tmp
     et_instance = et.return_value.__enter__.return_value
-    open_instance = open.return_value.__enter__.return_value
-    open_instance.read.return_value = video_updated_binary
 
     from superdesk.media.video import write_with_exiftool
 
-    args = ["-sep", ",", "-Creator=Phil,Harvey", "-overwrite_original"]
+    args = ["-sep", ",", "-Creator=Phil,Harvey", "-overwrite_original_in_place"]
     result = write_with_exiftool(video_binary, args)
 
-    tempfile.assert_called_once_with(delete=False)
+    tempfile.assert_called_once()
     tmp.write.assert_called_once_with(video_binary)
     tmp.flush.assert_called_once()
     et_instance.execute.assert_called_once_with(*args, tmp.name)
-    open.assert_called_once_with(tmp.name, "rb")
-    open_instance.read.assert_called_once()
     assert result == video_updated_binary
-    rm.assert_called_once_with(tmp.name)
 
 
 def test_read_from_video(video_binary) -> None:
@@ -165,9 +160,10 @@ def test_read_from_video(video_binary) -> None:
 
 
 def test_write_from_video(video_binary, video_updated_binary) -> None:
-    from superdesk.media.video import VideoMetadata, write_metadata
+    from superdesk.media.metadata_mapping import MediaMetadata
+    from superdesk.media.video import write_metadata
 
-    updates: VideoMetadata = {
+    updates: MediaMetadata = {
         "Description": "Your Description Here 1",
         "Headline": "Your Headline 2",
         "City": "Your City 3",

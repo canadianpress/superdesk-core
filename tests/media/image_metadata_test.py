@@ -4,12 +4,11 @@ from pytest import fixture
 from PIL import Image
 from PIL.IptcImagePlugin import getiptcinfo
 from superdesk.media.image import (
-    PhotoMetadata,
-    PhotoMetadataMapping,
-    get_metadata_from_item,
     read_metadata,
     write_metadata,
 )
+from superdesk.media.metadata_mapping import MediaMetadata, MediaMetadataMapping
+from superdesk.media.metadata import get_metadata_from_item
 from superdesk.types import Item
 
 from .. import fixture_path
@@ -24,7 +23,7 @@ def image_binary() -> bytes:
 
 def test_picture_metadata_read_write(image_binary) -> None:
     metadata = read_metadata(image_binary)
-    assert metadata == PhotoMetadata(
+    assert metadata == MediaMetadata(
         {
             "Description": "The Montreal Police logo is seen on a police car in Montreal on Wednesday, July 8, 2020. THE CANADIAN PRESS/Paul Chiasson",
             "DescriptionWriter": "pch",
@@ -43,7 +42,7 @@ def test_picture_metadata_read_write(image_binary) -> None:
         }
     )
 
-    updated = PhotoMetadata(
+    updated = MediaMetadata(
         {
             "Description": "description",
             "DescriptionWriter": "description writer",
@@ -81,13 +80,13 @@ def test_get_metadata_from_item() -> None:
             "filename": "baz",
         },
     )
-    mapping: PhotoMetadataMapping = dict(
+    mapping: MediaMetadataMapping = dict(
         headline="Headline",
         slugline="Title",
     )
     mapping["extra.filename"] = "JobId"
-    metadata = get_metadata_from_item(item, mapping)
-    assert metadata == PhotoMetadata(
+    metadata = get_metadata_from_item(item, mapping, "picture")
+    assert metadata == MediaMetadata(
         Headline="foo",
         Title="bar",
         JobId="baz",
