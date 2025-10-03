@@ -14,14 +14,16 @@ import superdesk
 
 from bson import ObjectId
 from bson.errors import InvalidId
+from bson.dbref import DBRef
 from cerberus import errors
 from eve.io.mongo import Validator
-from eve.utils import config
 from eve.auth import auth_field_and_value
-from flask import current_app as app
-from flask_babel import _
+from quart_babel import gettext as _
 from eve.validation import SingleErrorAsStringErrorHandler
 from werkzeug.datastructures import FileStorage
+
+from superdesk.core import get_app_config, get_current_app, get_current_async_app
+from superdesk.resource_fields import ID_FIELD
 
 
 ERROR_PATTERN = "pattern"
@@ -72,6 +74,48 @@ class SuperdeskValidator(Validator):
         kwargs["error_handler"] = SuperdeskErrorHandler
         super(SuperdeskValidator, self).__init__(*args, **kwargs)
         self.types_mapping.pop("date", None)
+
+    def _validate_data_relation(self, data_relation, field, value):
+        """
+        {'type': 'dict',
+        'schema': {
+           'resource': {'type': 'string', 'required': True},
+           'field': {'type': 'string', 'required': True},
+           'embeddable': {'type': 'boolean', 'default': False},
+           'version': {'type': 'boolean', 'default': False}
+        }}
+        """
+
+        if not value and self.schema[field].get("nullable"):
+            return
+
+        data_resource = data_relation.get("resource")
+
+        try:
+            # If an Eve resource is available, use it
+            superdesk.get_resource_service(data_resource)
+            return super()._validate_data_relation(data_relation, field, value)
+        except KeyError:
+            pass
+
+        # Otherwise try the Pydantic resource
+        data_field = data_relation.get("field")
+        async_app = get_current_async_app()
+        service = async_app.resources.get_resource_service(data_resource)
+
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, DBRef):
+                item_id = item.id
+            elif service.id_uses_objectid():
+                item_id = ObjectId(item)
+            else:
+                item_id = item
+
+            if not service.mongo.find_one({data_field: item_id}):
+                self._error(
+                    field,
+                    f"value '{item_id}' must exist in resource '{data_resource}', field '{data_field}'.",
+                )
 
     def _validate_mapping(self, mapping, field, value):
         """
@@ -158,9 +202,9 @@ class SuperdeskValidator(Validator):
     def _set_id_query(self, query):
         if self.document_id:
             try:
-                query[config.ID_FIELD] = {"$ne": ObjectId(self.document_id)}
+                query[ID_FIELD] = {"$ne": ObjectId(self.document_id)}
             except InvalidId:
-                query[config.ID_FIELD] = {"$ne": self.document_id}
+                query[ID_FIELD] = {"$ne": self.document_id}
 
     def _validate_iunique(self, unique, field, value):
         """
@@ -170,7 +214,8 @@ class SuperdeskValidator(Validator):
             pattern = "^{}$".format(re.escape(value.strip()))
             query = {field: re.compile(pattern, re.IGNORECASE)}
             self._set_id_query(query)
-            cursor = superdesk.get_resource_service(self.resource).get_from_mongo(req=None, lookup=query)
+            service = superdesk.get_resource_service(self.resource)
+            cursor = service.backend.get_from_mongo(service.datasource, req=None, lookup=query)
             if cursor.count():
                 self._error(field, ERROR_UNIQUE)
 
@@ -188,7 +233,8 @@ class SuperdeskValidator(Validator):
             query = {field: re.compile(pattern, re.IGNORECASE), parent_field: parent_field_value}
             self._set_id_query(query)
 
-            cursor = superdesk.get_resource_service(self.resource).get_from_mongo(req=None, lookup=query)
+            service = superdesk.get_resource_service(self.resource)
+            cursor = service.backend.get_from_mongo(service.datasource, req=None, lookup=query)
             if cursor.count():
                 self._error(field, ERROR_UNIQUE)
 
@@ -249,7 +295,7 @@ class SuperdeskValidator(Validator):
         query["template_name"] = re.compile("^{}$".format(re.escape(template_name.strip())), re.IGNORECASE)
 
         if self.document_id:
-            id_field = config.DOMAIN[self.resource]["id_field"]
+            id_field = get_app_config("DOMAIN", {})[self.resource]["id_field"]
             query[id_field] = {"$ne": self.document_id}
 
         if superdesk.get_resource_service(self.resource).find_one(req=None, **query):
@@ -268,8 +314,8 @@ class SuperdeskValidator(Validator):
         """
         if (
             enabled
-            and app.config.get("USER_USERNAME_PATTERN")
-            and not re.match(app.config["USER_USERNAME_PATTERN"], value or "")
+            and get_app_config("USER_USERNAME_PATTERN")
+            and not re.match(get_app_config("USER_USERNAME_PATTERN"), value or "")
         ):
             self._error(field, ERROR_PATTERN)
 
@@ -299,14 +345,14 @@ class SuperdeskValidator(Validator):
         {'type': 'boolean'}
         """
         if checked and value not in {"text", None}:
-            if app.data.find_one("content_types", req=None, type=value) is not None:
+            if get_current_app().data.find_one("content_types", req=None, type=value) is not None:
                 self._error(field, _("Only 1 instance is allowed."))
 
     def _validate_scope(self, checked, field, value):
         """
         {"type": "boolean"}
         """
-        registered = app.config.get("item_scope") or {}
+        registered = get_app_config("item_scope") or {}
         if checked and value not in registered:
             self._error(field, _("Unknown scope %(name)s", name=value))
 

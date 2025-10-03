@@ -95,16 +95,17 @@ class ConceptItemsServiceTestCase(TestCase):
         },
     ]
 
-    def setUp(self):
-        with self.app.app_context():
-            self.app.data.insert("concept_items", self.concept_items)
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.app.data.insert("concept_items", self.concept_items)
 
-    def test_query_all_items(self):
+    async def test_query_all_items(self):
         service = get_resource_service("concept_items")
+        items = await (await service.get_from_mongo_async(req=None, lookup={})).to_list()
 
-        self.assertEqual(len(list(service.get_from_mongo(req=None, lookup={}))), len(self.concept_items))
+        self.assertEqual(len(items), len(self.concept_items))
 
-    def test_query_sort_by_name_case_sensetive(self):
+    async def test_query_sort_by_name_case_sensetive(self):
         service = get_resource_service("concept_items")
         names = [
             "A Message to Garcia",
@@ -119,16 +120,16 @@ class ConceptItemsServiceTestCase(TestCase):
 
         req = ParsedRequest()
         req.sort = "name"
-        cursor = service.get_from_mongo(req=req, lookup={})
-        self.assertEqual([i["name"] for i in cursor], names)
+        cursor = await service.get_from_mongo_async(req=req, lookup={})
+        self.assertEqual([i["name"] async for i in cursor], names)
 
         req = ParsedRequest()
         req.sort = "-name"
         names.reverse()
-        cursor = service.get_from_mongo(req=req, lookup={})
-        self.assertEqual([i["name"] for i in cursor], names)
+        cursor = await service.get_from_mongo_async(req=req, lookup={})
+        self.assertEqual([i["name"] async for i in cursor], names)
 
-    def test_query_sort_by_name_case_insensetive(self):
+    async def test_query_sort_by_name_case_insensetive(self):
         service = get_resource_service("concept_items")
         names = [
             "A Message to Garcia",
@@ -144,17 +145,17 @@ class ConceptItemsServiceTestCase(TestCase):
         req = ParsedRequest()
         req.sort = "name"
         req.args = ImmutableMultiDict([("collation", '{"locale": "en", "strength":"1"}')])
-        cursor = service.get_from_mongo(req=req, lookup={})
-        self.assertEqual([i["name"] for i in cursor], names)
+        cursor = await service.get_from_mongo_async(req=req, lookup={})
+        self.assertEqual([i["name"] async for i in cursor], names)
 
         req = ParsedRequest()
         req.sort = "-name"
         req.args = ImmutableMultiDict([("collation", '{"locale": "en", "strength":"1"}')])
         names.reverse()
-        cursor = service.get_from_mongo(req=req, lookup={})
-        self.assertEqual([i["name"] for i in cursor], names)
+        cursor = await service.get_from_mongo_async(req=req, lookup={})
+        self.assertEqual([i["name"] async for i in cursor], names)
 
-    def test_service_adding_case_insensetive_collation(self):
+    async def test_service_adding_case_insensetive_collation(self):
         service = get_resource_service("concept_items")
         names = [
             "A Message to Garcia",
@@ -184,27 +185,27 @@ class ConceptItemsServiceTestCase(TestCase):
 
         req = ParsedRequest()
         req.sort = "name"
-        cursor = service.get(req=req, lookup={})
-        self.assertEqual([i["name"] for i in cursor], names)
+        cursor = await service.get_async(req=req, lookup={})
+        self.assertEqual([i["name"] async for i in cursor], names)
 
         req = ParsedRequest()
         req.sort = "-name"
         names.reverse()
-        cursor = service.get(req=req, lookup={})
-        self.assertEqual([i["name"] for i in cursor], names)
+        cursor = await service.get_async(req=req, lookup={})
+        self.assertEqual([i["name"] async for i in cursor], names)
 
         req = ParsedRequest()
         req.sort = "definition_text"
-        cursor = service.get(req=req, lookup={})
-        self.assertEqual([i["definition_text"] for i in cursor], definitions)
+        cursor = await service.get_async(req=req, lookup={})
+        self.assertEqual([i["definition_text"] async for i in cursor], definitions)
 
         req = ParsedRequest()
         req.sort = "-definition_text"
         definitions.reverse()
-        cursor = service.get(req=req, lookup={})
-        self.assertEqual([i["definition_text"] for i in cursor], definitions)
+        cursor = await service.get_async(req=req, lookup={})
+        self.assertEqual([i["definition_text"] async for i in cursor], definitions)
 
-    def test_service_use_definition_text_instead_of_definition_html(self):
+    async def test_service_use_definition_text_instead_of_definition_html(self):
         service = get_resource_service("concept_items")
         definitions = [
             "A Message to Garcia is a widely distributed essay written by Elbert Hubbard in 1899, "
@@ -224,11 +225,11 @@ class ConceptItemsServiceTestCase(TestCase):
 
         req = ParsedRequest()
         req.sort = "definition_html"
-        cursor = service.get(req=req, lookup={})
-        self.assertEqual([i["definition_text"] for i in cursor], definitions)
+        cursor = await service.get_async(req=req, lookup={})
+        self.assertEqual([i["definition_text"] async for i in cursor], definitions)
 
         req = ParsedRequest()
         req.sort = "-definition_html"
         definitions.reverse()
-        cursor = service.get(req=req, lookup={})
-        self.assertEqual([i["definition_text"] for i in cursor], definitions)
+        cursor = await service.get_async(req=req, lookup={})
+        self.assertEqual([i["definition_text"] async for i in cursor], definitions)

@@ -17,15 +17,16 @@ from copy import copy
 from eve.utils import ParsedRequest
 from eve.versioning import resolve_document_version
 
+from superdesk.eve_async.service import AsyncBaseService
+from superdesk.resource_fields import ID_FIELD
 from superdesk.users.services import current_user_has_privilege
 from superdesk.resource import Resource
 from superdesk.errors import StopDuplication, SuperdeskApiError, InvalidStateTransitionError
 from superdesk.notification import push_notification
 from superdesk.utc import utcnow
 from superdesk.metadata.utils import item_url
-from superdesk.services import BaseService
 from superdesk.metadata.item import metadata_schema, ITEM_STATE, CONTENT_STATE, ITEM_TYPE
-from superdesk import get_resource_service, config
+from superdesk import get_resource_service
 from superdesk.activity import add_activity, ACTIVITY_CREATE, ACTIVITY_UPDATE
 from superdesk.workflow import is_workflow_state_transition_valid
 from apps.archive.common import (
@@ -33,14 +34,14 @@ from apps.archive.common import (
     item_operations,
     ITEM_OPERATION,
     update_version,
-    insert_into_versions,
+    insert_into_versions_async,
     is_assigned_to_a_desk,
     convert_task_attributes_to_objectId,
     on_create_item,
     ARCHIVE,
     get_subject,
 )
-from flask_babel import _, lazy_gettext
+from quart_babel import gettext as _, lazy_gettext
 
 task_statuses = ["todo", "in_progress", "done"]
 default_status = "todo"
@@ -69,7 +70,7 @@ def compare_dictionaries(original, updates):
     return modified
 
 
-def send_to(doc, update=None, desk_id=None, stage_id=None, user_id=None, default_stage="incoming_stage"):
+async def send_to(doc, update=None, desk_id=None, stage_id=None, user_id=None, default_stage="incoming_stage"):
     """Send item to given desk and stage.
 
     Applies the outgoing and incoming macros of current and destination stages
@@ -85,14 +86,15 @@ def send_to(doc, update=None, desk_id=None, stage_id=None, user_id=None, default
     original_task = doc.setdefault("task", {})
     current_stage = None
     if original_task.get("stage"):
-        current_stage = get_resource_service("stages").find_one(req=None, _id=original_task.get("stage"))
+        current_stage = await get_resource_service("stages").find_one_async(req=None, _id=original_task.get("stage"))
     desk = destination_stage = None
     task = {"desk": desk_id, "stage": stage_id, "user": original_task.get("user") if user_id is None else user_id}
 
     if current_stage:
-        apply_stage_rule(doc, update, current_stage, MACRO_OUTGOING)
+        await apply_stage_rule(doc, update, current_stage, MACRO_OUTGOING)
 
     if desk_id:
+        # TODO-ASYNC[desks]: Use DesksResourceModel async service where when upgrading this module
         desk = superdesk.get_resource_service("desks").find_one(req=None, _id=desk_id)
         if not desk:
             raise SuperdeskApiError.notFoundError(_("Invalid desk identifier {desk_id}").format(desk_id=desk_id))
@@ -105,10 +107,12 @@ def send_to(doc, update=None, desk_id=None, stage_id=None, user_id=None, default
         task["desk"] = desk_id
         if not stage_id:
             task["stage"] = desk.get(default_stage)
-            destination_stage = get_resource_service("stages").find_one(req=None, _id=desk.get(default_stage))
+            destination_stage = await get_resource_service("stages").find_one_async(
+                req=None, _id=desk.get(default_stage)
+            )
 
     if stage_id:
-        destination_stage = get_resource_service("stages").find_one(req=None, _id=stage_id)
+        destination_stage = await get_resource_service("stages").find_one_async(req=None, _id=stage_id)
         if not destination_stage:
             raise SuperdeskApiError.notFoundError(_("Invalid stage identifier {stage_id}").format(stage_id=stage_id))
 
@@ -124,7 +128,7 @@ def send_to(doc, update=None, desk_id=None, stage_id=None, user_id=None, default
         doc["expiry"] = get_item_expiry(desk=desk, stage=destination_stage)
 
     if destination_stage:
-        apply_stage_rule(doc, update, destination_stage, MACRO_INCOMING, desk=desk, task=task)
+        await apply_stage_rule(doc, update, destination_stage, MACRO_INCOMING, desk=desk, task=task)
         if destination_stage.get("task_status"):
             if update:
                 update["task"]["status"] = destination_stage["task_status"]
@@ -132,7 +136,7 @@ def send_to(doc, update=None, desk_id=None, stage_id=None, user_id=None, default
                 doc["task"]["status"] = destination_stage["task_status"]
 
 
-def apply_stage_rule(doc, update, stage, rule_type, desk=None, task=None):
+async def apply_stage_rule(doc, update, stage, rule_type, desk=None, task=None):
     macro_type = "{}_macro".format(rule_type)
 
     if stage.get(macro_type):
@@ -142,7 +146,8 @@ def apply_stage_rule(doc, update, stage, rule_type, desk=None, task=None):
             if not macro:
                 logger.warning("macro %s is missing", stage.get(macro_type))
                 return
-            macro["callback"](doc, desk=desk, stage=stage, task=task)
+
+            await macro["callback"](doc, desk=desk, stage=stage, task=task)
             if update:
                 modified = compare_dictionaries(original_doc, doc)
                 for i in modified:
@@ -156,17 +161,17 @@ def apply_stage_rule(doc, update, stage, rule_type, desk=None, task=None):
             raise SuperdeskApiError.badRequestError(message)
 
 
-def apply_onstage_rule(doc, _id):
+async def apply_onstage_rule(doc, _id):
     """Apply any on stage macro/rule that may be defined for the stage.
 
     :param doc:
     :param _id:
     :return:
     """
-    doc[config.ID_FIELD] = _id
-    stage = get_resource_service("stages").find_one(req=None, _id=doc.get("task", {}).get("stage"))
+    doc[ID_FIELD] = _id
+    stage = await get_resource_service("stages").find_one_async(req=None, _id=doc.get("task", {}).get("stage"))
     if stage:
-        apply_stage_rule(doc, None, stage, "onstage")
+        await apply_stage_rule(doc, None, stage, "onstage")
 
 
 class TaskResource(Resource):
@@ -204,11 +209,11 @@ class TaskResource(Resource):
     privileges = {"POST": "tasks", "PATCH": "tasks", "DELETE": "tasks"}
 
 
-class TasksService(BaseService):
-    def get(self, req, lookup):
+class TasksService(AsyncBaseService):
+    async def get_async(self, req, lookup):
         if req is None:
             req = ParsedRequest()
-        return self.backend.get("tasks", req=req, lookup=lookup)
+        return await self.backend.get_async("tasks", req=req, lookup=lookup)
 
     def update_times(self, doc):
         task = doc.get("task", {})
@@ -244,27 +249,27 @@ class TasksService(BaseService):
             )
             resolve_document_version(updates, ARCHIVE, "PATCH", original)
 
-    def update_stage(self, doc):
+    async def update_stage(self, doc):
         task = doc.get("task", {})
         desk_id = task.get("desk", None)
         stage_id = task.get("stage", None)
-        send_to(doc=doc, desk_id=desk_id, stage_id=stage_id)
+        await send_to(doc=doc, desk_id=desk_id, stage_id=stage_id)
 
-    def on_create(self, docs):
-        on_create_item(docs)
+    async def on_create_async(self, docs):
+        await on_create_item(docs)
         for doc in docs:
             resolve_document_version(doc, ARCHIVE, "POST")
             self.update_times(doc)
-            self.update_stage(doc)
+            await self.update_stage(doc)
             convert_task_attributes_to_objectId(doc)
 
-    def on_created(self, docs):
+    async def on_created_async(self, docs):
         push_notification(self.datasource, created=1)
         push_notification("task:new")
         for doc in docs:
-            insert_into_versions(doc["_id"])
+            await insert_into_versions_async(doc["_id"])
             if is_assigned_to_a_desk(doc):
-                add_activity(
+                await add_activity(
                     ACTIVITY_CREATE,
                     "added new task {{ subject }} of type {{ type }}",
                     self.datasource,
@@ -273,7 +278,7 @@ class TasksService(BaseService):
                     type=doc[ITEM_TYPE],
                 )
 
-    def on_update(self, updates, original):
+    async def on_update_async(self, updates, original):
         self.update_times(updates)
         if is_assigned_to_a_desk(updates):
             self.__update_state(updates, original)
@@ -282,16 +287,16 @@ class TasksService(BaseService):
         new_user_id = updates.get("task", {}).get("user", "")
         if new_stage_id and new_stage_id != old_stage_id:
             updates[ITEM_OPERATION] = ITEM_SEND
-            send_to(doc=original, update=updates, desk_id=None, stage_id=new_stage_id, user_id=new_user_id)
+            await send_to(doc=original, update=updates, desk_id=None, stage_id=new_stage_id, user_id=new_user_id)
             resolve_document_version(updates, ARCHIVE, "PATCH", original)
         convert_task_attributes_to_objectId(updates)
         update_version(updates, original)
 
-    def on_updated(self, updates, original):
+    async def on_updated_async(self, updates, original):
         updated = copy(original)
         updated.update(updates)
         if self._stage_changed(updates, original):
-            insert_into_versions(doc=updated)
+            await insert_into_versions_async(doc=updated)
         new_task = updates.get("task", {})
         old_task = original.get("task", {})
         if new_task.get("stage") != old_task.get("stage"):
@@ -307,8 +312,8 @@ class TasksService(BaseService):
 
         if is_assigned_to_a_desk(updated):
             if self.__is_content_assigned_to_new_desk(original, updates) and not self._stage_changed(updates, original):
-                insert_into_versions(doc=updated)
-            add_activity(
+                await insert_into_versions_async(doc=updated)
+            await add_activity(
                 ACTIVITY_UPDATE,
                 "updated task {{ subject }} for item {{ type }}",
                 self.datasource,
@@ -320,8 +325,9 @@ class TasksService(BaseService):
     def on_deleted(self, doc):
         push_notification(self.datasource, deleted=1)
 
-    def assign_user(self, item_id, updates):
-        return self.patch(item_id, updates)
+    async def assign_user(self, item_id, updates):
+        # Only used by ItemLock component, keep sync for now
+        return await self.patch_async(item_id, updates)
 
     def _stage_changed(self, updates, original):
         new_stage_id = str(updates.get("task", {}).get("stage", ""))

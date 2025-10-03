@@ -11,11 +11,12 @@ import json
 
 from eve.utils import ParsedRequest
 
-import superdesk
 import logging
 from copy import deepcopy
-from flask import current_app as app
-from superdesk import get_resource_service, config
+
+from superdesk.core import get_current_app
+from superdesk.resource_fields import ID_FIELD
+from superdesk import get_resource_service
 from superdesk.errors import SuperdeskApiError
 from superdesk.media.media_operations import crop_image, process_file_from_stream
 from superdesk.upload import url_for_media
@@ -152,6 +153,7 @@ class CropService:
         :return: Matching crop or None
         """
         if not self.crop_sizes:
+            # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
             self.crop_sizes = get_resource_service("vocabularies").find_one(req=None, _id="crop_sizes").get("items")
 
         if not self.crop_sizes:
@@ -168,7 +170,7 @@ class CropService:
         :raises SuperdeskApiError.badRequestError
         :return dict: rendition
         """
-        original_file = app.media.fetch_rendition(original_image)
+        original_file = get_current_app().media.fetch_rendition(original_image)
         if not original_file:
             raise SuperdeskApiError.badRequestError("Original file couldn't be found")
         try:
@@ -202,6 +204,7 @@ class CropService:
         :raises SuperdeskApiError.internalError
         """
         crop = {}
+        app = get_current_app()
         try:
             file_name, content_type, metadata = process_file_from_stream(
                 file_stream, content_type=original.get("mimetype")
@@ -231,7 +234,7 @@ class CropService:
         :param Object_id file_id: Object_Id of the file.
         """
         try:
-            app.media.delete(file_id)
+            get_current_app().media.delete(file_id)
         except Exception:
             logger.exception("Crop File cannot be deleted. File_Id {}".format(file_id))
 
@@ -326,7 +329,7 @@ class CropService:
                 ).get("media"):
                     self._delete_crop_file(renditions.get(key, {}).get("media"))
 
-    def update_media_references(self, updates, original, published=False):
+    async def update_media_references(self, updates, original, published=False):
         """Update the media references collection.
          When item (media item or associated media) is updated or created,
          media_references are created. These media_references are updated to published state
@@ -336,7 +339,7 @@ class CropService:
         :param dict original: Original item
         :param boolean published: True if publishing the item else False
         """
-        item_id = original.get(config.ID_FIELD)
+        item_id = original.get(ID_FIELD)
         references = {}
         if updates.get("renditions", original.get("renditions", {})):
             references = {item_id: updates.get("renditions", original.get("renditions", {}))}
@@ -347,7 +350,7 @@ class CropService:
                 return
 
             references = {
-                assoc.get(config.ID_FIELD): assoc.get("renditions")
+                assoc.get(ID_FIELD): assoc.get("renditions")
                 for assoc in associations.values()
                 if assoc and assoc.get("renditions")
             }
@@ -362,10 +365,12 @@ class CropService:
                     continue
 
                 media = str(rendition.get("media"))
-                reference = get_resource_service("media_references").find_one(req=None, item_id=item_id, media_id=media)
+                reference = await get_resource_service("media_references").find_one_async(
+                    req=None, item_id=item_id, media_id=media
+                )
                 if not reference:
                     try:
-                        get_resource_service("media_references").post(
+                        await get_resource_service("media_references").post_async(
                             [
                                 {
                                     "item_id": item_id,
@@ -384,10 +389,12 @@ class CropService:
 
         req = ParsedRequest()
         req.where = json.dumps({"item_id": item_id, "published": False})
-        refs = list(get_resource_service("media_references").get(req=req, lookup=None))
+        refs = await (await get_resource_service("media_references").get_async(req=req, lookup=None)).to_list()
         for ref in refs:
             try:
-                get_resource_service("media_references").patch(ref.get(config.ID_FIELD), updates={"published": True})
+                await get_resource_service("media_references").patch_async(
+                    ref.get(ID_FIELD), updates={"published": True}
+                )
             except Exception:
                 logger.exception(
                     "Failed to update media "

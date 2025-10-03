@@ -8,21 +8,23 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
-from unittest import mock
+from unittest import mock, IsolatedAsyncioTestCase
 from unittest.mock import MagicMock
-from flask import Flask
 from werkzeug.datastructures import MultiDict
-from content_api.tests import ApiTestCase
+
+from superdesk.flask import Flask
 
 
-class SearchServiceTestCase(ApiTestCase):
+class SearchServiceTestCase(IsolatedAsyncioTestCase):
     """Base class for the `items` service tests."""
 
-    def setUp(self):
+    async def asyncSetUp(self):
         self.app = Flask(__name__)
         self.ctx = self.app.test_request_context("/")
-        self.ctx.push()
-        self.addCleanup(self.ctx.pop)
+        await self.ctx.push()
+
+    async def asyncTearDown(self):
+        await self.ctx.pop()
 
     def _get_target_class(self):
         """Return the class under test.
@@ -73,7 +75,7 @@ class MapResponseTestCast(SearchServiceTestCase):
 
         self.assertEqual(item, expected)
 
-    def test_aggregations(self):
+    async def test_aggregations(self):
         fake_request = MagicMock()
         fake_request.args = MultiDict([("aggregations", 1)])
         lookup = {}

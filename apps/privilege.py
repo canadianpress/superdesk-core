@@ -10,13 +10,14 @@
 
 import superdesk
 
-from flask_babel import _
+from quart_babel import gettext as _
 from operator import itemgetter
 
 from superdesk.utils import ListCursor
 from superdesk.privilege import get_privilege_list
 
 
+# Not upgrading to async, as there is not I/O to wait on
 class PrivilegeService(superdesk.Service):
     def get(self, req, lookup):
         """

@@ -11,6 +11,7 @@
 import logging
 import datetime
 
+from superdesk.core import get_current_app, get_app_config
 from superdesk.utc import utc
 from superdesk.io.registry import register_feed_parser
 from superdesk.io.feed_parsers import FeedParser
@@ -18,7 +19,6 @@ from superdesk.io.iptc import subject_codes
 from superdesk.metadata.item import ITEM_URGENCY, ITEM_PRIORITY, Priority
 from apps.archive.common import format_dateline_to_locmmmddsrc
 from superdesk.utc import get_date
-from flask import current_app as app
 from superdesk import get_resource_service
 
 
@@ -124,7 +124,7 @@ class APMediaFeedParser(FeedParser):
         except ValueError:
             return datetime.datetime.strptime(string, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=utc)
 
-    def categorisation_mapping(self, in_item, item):
+    async def categorisation_mapping(self, in_item, item):
         """
         Function that maps categorisation fields may be overloaded if not required
         :param in_item:
@@ -135,17 +135,17 @@ class APMediaFeedParser(FeedParser):
             categories = [{"qcode": c.get("code")} for c in in_item.get("subject") if c.get("rels") == ["category"]]
             if len(categories):
                 item["anpa_category"] = [categories[0]]
-                self._map_category_codes(item)
+                await self._map_category_codes(item)
 
         self._map_sluglines_to_subjects(item=item)
 
-    def _map_category_codes(self, item):
+    async def _map_category_codes(self, item):
         """Map the category code that has been received to a more palatable value
 
         :param item:
         :return:
         """
-        category_code_map = get_resource_service("vocabularies").find_one(req=None, _id="ap_category_map")
+        category_code_map = await get_resource_service("vocabularies").find_one_async(req=None, _id="ap_category_map")
         if category_code_map:
             map = {c["ap_code"]: c["category_code"] for c in category_code_map["items"] if c["is_active"]}
             for category in item.get("anpa_category", []):
@@ -166,7 +166,7 @@ class APMediaFeedParser(FeedParser):
                 except KeyError:
                     logger.debug("Subject code '%s' not found" % qcode)
 
-    def parse(self, s_json, provider=None):
+    async def parse(self, s_json, provider=None):
         in_item = s_json.get("data", {}).get("item")
         nitf_item = s_json.get("nitf", {})
         item = {"guid": in_item.get("altids", {}).get("itemid") + ":" + str(in_item.get("version"))}
@@ -189,7 +189,7 @@ class APMediaFeedParser(FeedParser):
             item["original_source"] = ",".join([n.get("name") for n in in_item.get("infosource", [])])
 
         if in_item.get("datelinelocation"):
-            cities = app.locators.find_cities()
+            cities = get_current_app().locators.find_cities()
             # Try to find a single matching city either by city and country or city country and state
             located = [
                 c
@@ -254,7 +254,7 @@ class APMediaFeedParser(FeedParser):
             if in_item.get("headline_extended"):
                 item["abstract"] = in_item.get("headline_extended")
 
-            self.categorisation_mapping(in_item, item)
+            await self.categorisation_mapping(in_item, item)
 
             # Map the urgency to urgency and priority
             if in_item.get("urgency"):
@@ -266,16 +266,16 @@ class APMediaFeedParser(FeedParser):
                 item["body_html"] = nitf_item.get("body_html").replace('<block id="Main">', "").replace("</block>", "")
 
         if s_json.get("associations"):
-            self._parse_associations(s_json["associations"], item, provider)
+            await self._parse_associations(s_json["associations"], item, provider)
 
         return item
 
-    def _parse_associations(self, associations, item, provider=None):
-        related_id = getattr(self, "RELATED_ID", app.config.get("INGEST_AP_RELATED_ID"))
+    async def _parse_associations(self, associations, item, provider=None):
+        related_id = getattr(self, "RELATED_ID", get_app_config("INGEST_AP_RELATED_ID"))
         if related_id:
             item["associations"] = {}
             for key, raw in associations.items():
-                item["associations"]["{}--{}".format(related_id, key)] = self.parse(raw, provider)
+                item["associations"]["{}--{}".format(related_id, key)] = await self.parse(raw, provider)
 
     def _parse_renditions(self, renditions, item):
         try:

@@ -33,6 +33,27 @@ how the Superdesk server works.
 
 * `Installation <https://www.superdesk.org/news/installing-superdesk-publisher>`_
 
+New Core Framework
+------------------
+
+This is the new core application framework, starting from v3.0 onwards. Use this for any new code, or migrating
+existing code to the new framework.
+
+.. toctree::
+   :maxdepth: 2
+
+   core/app
+   core/config
+   core/modules
+   core/resources
+   core/resource_management
+   core/web
+   core/signals
+   core/mongo
+   core/elastic
+   core/storage
+   core/types
+
 .. _reference:
 
 Reference

@@ -9,7 +9,7 @@
 # at https://www.sourcefabric.org/superdesk/license
 import json
 from eve.utils import ParsedRequest
-from superdesk.tests import TestCase
+from superdesk.tests import TestCase, utils as test_utils
 from superdesk import get_resource_service
 
 
@@ -23,54 +23,55 @@ class ElasticSearchSettingsTest(TestCase):
         {"_id": "984", "headline": "Test 6", "slugline": "Soccer Germany", "body_html": "Test"},
     ]
 
-    def setUp(self):
-        get_resource_service("ingest").post(self.items)
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        await test_utils.post_items("ingest", self.items)
 
-    def test_query_prefix_soccer(self):
+    async def test_query_prefix_soccer(self):
         query = {"query": {"filtered": {"query": {"match_phrase_prefix": {"slugline.phrase": "soccer"}}}}}
 
         req = ParsedRequest()
         req.args = {"source": json.dumps(query)}
-        query_result = get_resource_service("ingest").get(req=req, lookup=None)
-        self.assertEqual(query_result.count(), 4)
-        sluglines = [item.get("slugline") for item in query_result]
+        query_result = await get_resource_service("ingest").get_async(req=req, lookup=None)
+        self.assertEqual(await query_result.count(), 4)
+        sluglines = [item.get("slugline") async for item in query_result]
         self.assertIn("Soccer Germany", sluglines)
         self.assertIn("Soccer-England/Result", sluglines)
         self.assertIn("Soccer England", sluglines)
         self.assertIn("Soccer England Result", sluglines)
 
-    def test_query_prefix_soccer_england(self):
+    async def test_query_prefix_soccer_england(self):
         query = {"query": {"filtered": {"query": {"match_phrase_prefix": {"slugline.phrase": "soccer england"}}}}}
 
         req = ParsedRequest()
         req.args = {"source": json.dumps(query)}
-        query_result = get_resource_service("ingest").get(req=req, lookup=None)
-        self.assertEqual(query_result.count(), 3)
-        sluglines = [item.get("slugline") for item in query_result]
+        query_result = await get_resource_service("ingest").get_async(req=req, lookup=None)
+        self.assertEqual(await query_result.count(), 3)
+        sluglines = [item.get("slugline") async for item in query_result]
         self.assertIn("Soccer-England/Result", sluglines)
         self.assertIn("Soccer England", sluglines)
         self.assertIn("Soccer England Result", sluglines)
 
-    def test_query_prefix_soccer_england_result_without_forward_slash(self):
+    async def test_query_prefix_soccer_england_result_without_forward_slash(self):
         query = {
             "query": {"filtered": {"query": {"match_phrase_prefix": {"slugline.phrase": "soccer-england result"}}}}
         }
 
         req = ParsedRequest()
         req.args = {"source": json.dumps(query)}
-        query_result = get_resource_service("ingest").get(req=req, lookup=None)
-        self.assertEqual(query_result.count(), 1)
-        sluglines = [item.get("slugline") for item in query_result]
+        query_result = await get_resource_service("ingest").get_async(req=req, lookup=None)
+        self.assertEqual(await query_result.count(), 1)
+        sluglines = [item.get("slugline") async for item in query_result]
         self.assertIn("Soccer England Result", sluglines)
 
-    def test_query_prefix_soccer_england_result_with_forward_slash(self):
+    async def test_query_prefix_soccer_england_result_with_forward_slash(self):
         query = {
             "query": {"filtered": {"query": {"match_phrase_prefix": {"slugline.phrase": "soccer england/result"}}}}
         }
 
         req = ParsedRequest()
         req.args = {"source": json.dumps(query)}
-        query_result = get_resource_service("ingest").get(req=req, lookup=None)
-        self.assertEqual(query_result.count(), 1)
-        sluglines = [item.get("slugline") for item in query_result]
+        query_result = await get_resource_service("ingest").get_async(req=req, lookup=None)
+        self.assertEqual(await query_result.count(), 1)
+        sluglines = [item.get("slugline") async for item in query_result]
         self.assertIn("Soccer-England/Result", sluglines)

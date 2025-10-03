@@ -22,11 +22,11 @@
 
 import ast
 import logging
-from flask import request, current_app as app
-from flask_babel import _
+from quart_babel import gettext as _
 from bson import ObjectId
 
-import superdesk
+from superdesk.core import get_app_config
+from superdesk.flask import request, Blueprint
 from superdesk.errors import SuperdeskApiError
 from superdesk.notification import push_notification
 from superdesk.storage.superdesk_file import generate_response_for_file
@@ -38,7 +38,7 @@ from .utils import get_file_from_sams, get_attachments_from_asset_id, get_image_
 from .client import get_sams_client
 
 logger = logging.getLogger(__name__)
-assets_bp = superdesk.Blueprint("sams_assets", __name__)
+assets_bp = Blueprint("sams_assets", __name__)
 
 
 @assets_bp.route("/sams/assets", methods=["GET"])
@@ -61,17 +61,17 @@ def find_one(item_id):
 
 
 @assets_bp.route("/sams/assets/binary/<item_id>", methods=["GET"])
-def get_binary(item_id):
+async def get_binary(item_id):
     """
     Uses item_id and returns the corresponding
     asset binary
     """
     file = get_file_from_sams(get_sams_client(), item_id)
-    return generate_response_for_file(file)
+    return await generate_response_for_file(file)
 
 
 @assets_bp.route("/sams/assets/images/<item_id>", methods=["GET"])
-def download_image(item_id: str):
+async def download_image(item_id: str):
     """Downloads an image from SAMS and sends back to the requestee"""
 
     width = int(request.args["width"]) if request.args.get("width") else None
@@ -82,25 +82,25 @@ def download_image(item_id: str):
     if not file:
         raise SuperdeskApiError.notFoundError(_("SAMS Image Asset not found"))
 
-    return generate_response_for_file(file)
+    return await generate_response_for_file(file)
 
 
 @assets_bp.route("/sams/assets", methods=["POST"])
-def create():
+async def create():
     """
     Creates new Asset
     """
-    files = {"binary": request.files["binary"]}
-    docs = request.form.to_dict()
+    files = {"binary": (await request.files)["binary"]}
+    docs = (await request.form).to_dict()
     sams_client = get_sams_client()
     post_response = sams_client.assets.create(docs=docs, files=files, external_user_id=get_user_id(True))
     response = post_response.json()
     if post_response.status_code == 201:
         if response.get("mimetype", "").startswith("image/"):
             # Create renditions.
-            renditions = [k for k in app.config["RENDITIONS"]["sams"].keys()]
+            renditions = [k for k in get_app_config("RENDITIONS")["sams"].keys()]
             for rendition in renditions:
-                dimensions = app.config["RENDITIONS"]["sams"][rendition]
+                dimensions = get_app_config("RENDITIONS")["sams"][rendition]
                 rendition_response = sams_client.images.generate_rendition(
                     response["_id"],
                     width=dimensions.get("width"),
@@ -156,7 +156,7 @@ def delete(item_id):
 
 
 @assets_bp.route("/sams/assets/<item_id>", methods=["PATCH"])
-def update(item_id):
+async def update(item_id):
     """
     Uses item_id and updates the corresponding asset
     """
@@ -165,11 +165,11 @@ def update(item_id):
     except KeyError:
         raise SuperdeskApiError.badRequestError("If-Match field missing in header")
 
-    if request.files.get("binary"):
+    if (await request.files).get("binary"):
         # The binary data was supplied so this must be a multipart request
         # Get the updates from the `request.form` attribute
-        files = {"binary": request.files["binary"]}
-        updates = request.form.to_dict()
+        files = {"binary": (await request.files)["binary"]}
+        updates = (await request.form).to_dict()
     else:
         # Only the metadata was supplied so this must be a standard JSON request
         # Get the updates from the `request.get_json` function

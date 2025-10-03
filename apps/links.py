@@ -1,9 +1,9 @@
 import superdesk
-
-from flask import request, current_app as app, json
+from superdesk.core import json, get_app_config
+from superdesk.flask import request
 from superdesk.resource import build_custom_hateoas
 
-from apps.archive.archive import ArchiveResource, ArchiveService
+from apps.archive import ArchiveResource, ArchiveService
 from apps.archive.common import CUSTOM_HATEOAS
 
 
@@ -25,7 +25,7 @@ def elastic_filter(req=None):
         },
     }
 
-    LINKS_HOURS = app.config.get("LINKS_MAX_HOURS")
+    LINKS_HOURS = get_app_config("LINKS_MAX_HOURS")
     if LINKS_HOURS:
         query["bool"].update(
             {
@@ -63,9 +63,9 @@ class LinksService(ArchiveService):
         for item in items:
             build_custom_hateoas(CUSTOM_HATEOAS, item)
 
-    def get(self, req, lookup):
+    async def get_async(self, req, lookup):
         req.where = None  # it's handled in the elastic_filter
-        return super().get(req, lookup)
+        return await super().get_async(req, lookup)
 
 
 def init_app(_app) -> None:

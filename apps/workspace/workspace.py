@@ -9,7 +9,8 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 import superdesk
-from flask import request
+from superdesk.eve_async import AsyncBaseService
+from superdesk.flask import request
 
 
 class WorkspaceResource(superdesk.Resource):
@@ -23,11 +24,11 @@ class WorkspaceResource(superdesk.Resource):
     item_methods = ["GET", "PATCH", "DELETE"]
 
 
-class WorkspaceService(superdesk.Service):
-    def is_authorized(self, **kwargs):
+class WorkspaceService(AsyncBaseService):
+    async def is_authorized(self, **kwargs):
         if kwargs.get("_id"):
-            data = self.find_one(req=None, _id=kwargs.get("_id")) or request.get_json()
+            data = await (self.find_one_async(req=None, _id=kwargs.get("_id")) or request.get_json())
         else:
-            data = request.get_json()
+            data = await request.get_json()
         # TODO(petr): use privileges to test who can save desk/role dashboard
         return "user" not in data or str(data["user"]) == str(kwargs["user_id"])

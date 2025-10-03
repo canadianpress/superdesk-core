@@ -1,28 +1,30 @@
-from superdesk.tests import TestCase
+from unittest.mock import patch
+from datetime import datetime, timedelta
+
+from bson import ObjectId
+
+from superdesk.tests import TestCase, utils as test_utils
 from superdesk.utc import utcnow
 from apps.archive.commands import RemoveExpiredContent
-from datetime import datetime, timedelta
-from unittest.mock import patch
-from bson import ObjectId
 
 
 class RemoveExpiredContentTestCase(TestCase):
-    test_context = False
-
-    def test_is_expired(self):
+    async def test_is_expired(self):
         now = utcnow()
         command = RemoveExpiredContent()
         item = {"expiry": None, "_id": "foo", "state": "draft", "_updated": now}
-        self.assertFalse(command._can_remove_item(item, now))
+        self.assertFalse(await command._can_remove_item(item, now))
         item["_updated"] = now - timedelta(days=30)
-        self.assertTrue(command._can_remove_item(item, now))
+        self.assertTrue(await command._can_remove_item(item, now))
         item["expiry"] = now + timedelta(days=1)
-        self.assertFalse(command._can_remove_item(item, now))
+        self.assertFalse(await command._can_remove_item(item, now))
 
-    def test_spiked_expired_without_explicit_expiry(self):
+    async def test_spiked_expired_without_explicit_expiry(self):
         now = utcnow()
 
-        self.app.data.insert(
+        desk_id = (await test_utils.post_items("desks", [{"name": "sports"}]))[0]
+
+        await self.app.data.insert_async(
             "archive",
             [
                 {"type": "text", "state": "spiked", "_updated": now - timedelta(days=50)},
@@ -30,20 +32,20 @@ class RemoveExpiredContentTestCase(TestCase):
                     "type": "text",
                     "state": "in_progress",
                     "_updated": now - timedelta(days=50),
-                    "task": {"desk": "sports"},
+                    "task": {"desk": desk_id},
                     "expiry": None,
                 },
             ],
         )
 
-        assert self.app.data.find_all("archive").count() == 2
+        assert await test_utils.count("archive") == 2
 
-        RemoveExpiredContent().run()
+        await RemoveExpiredContent().run()
 
-        assert self.app.data.find_all("archive").count() == 0
+        assert await test_utils.count("archive") == 0
 
-    def test_expired_archived_picture(self):
-        self.app.data.insert(
+    async def test_expired_archived_picture(self):
+        await test_utils.post_items(
             "archived",
             [
                 {
@@ -56,7 +58,6 @@ class RemoveExpiredContentTestCase(TestCase):
         )
 
         with patch.dict(self.app.config, {"ARCHIVED_EXPIRY_MINUTES": 1}):
-            RemoveExpiredContent().run()
+            await RemoveExpiredContent().run()
 
-        archived_items = self.app.data.find_all("archived")
-        assert 0 == archived_items.count()
+        assert await test_utils.count("archived") == 0

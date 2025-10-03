@@ -12,7 +12,7 @@
 import superdesk
 from superdesk.celery_app import celery
 from .audit import AuditService, AuditResource
-from .commands import PurgeAudit
+from .commands import cli_audit_purge, PurgeAudit
 import logging
 
 log = logging.getLogger(__name__)
@@ -30,5 +30,5 @@ def init_app(app) -> None:
 
 
 @celery.task(soft_time_limit=600)
-def gc_audit():
-    PurgeAudit().run()
+async def gc_audit():
+    await PurgeAudit().run()

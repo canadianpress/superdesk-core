@@ -1,14 +1,14 @@
 import socket
 import ftplib
 
-from contextlib import contextmanager
-from flask import current_app as app
+from contextlib import asynccontextmanager
+from superdesk.core import get_app_config
 
 from superdesk.errors import IngestFtpError
 
 
-@contextmanager
-def ftp_connect(config):
+@asynccontextmanager
+async def ftp_connect(config):
     """Get ftp connection for given config.
 
     use with `with`
@@ -17,26 +17,26 @@ def ftp_connect(config):
     """
     if config.get("use_ftps", False):
         try:
-            ftp = ftplib.FTP_TLS(config.get("host"), timeout=app.config.get("FTP_TIMEOUT", 300))
+            ftp = ftplib.FTP_TLS(config.get("host"), timeout=get_app_config("FTP_TIMEOUT", 300))
         except socket.gaierror as e:
-            raise IngestFtpError.ftpHostError(exception=e)
+            raise await IngestFtpError.ftpHostError(exception=e).send_notifications()
 
         try:
             ftp.auth()
         except ftplib.error_perm as ae:
             ftp.close()
-            raise IngestFtpError.ftpAuthError(exception=ae)
+            raise await IngestFtpError.ftpAuthError(exception=ae).send_notifications()
     else:
         try:
-            ftp = ftplib.FTP(config.get("host"), timeout=app.config.get("FTP_TIMEOUT", 300))
+            ftp = ftplib.FTP(config.get("host"), timeout=get_app_config("FTP_TIMEOUT", 300))
         except socket.gaierror as e:
-            raise IngestFtpError.ftpHostError(exception=e)
+            raise await IngestFtpError.ftpHostError(exception=e).send_notifications()
 
     if config.get("username"):
         try:
             ftp.login(config.get("username"), config.get("password"))
         except ftplib.error_perm as e:
-            raise IngestFtpError.ftpAuthError(exception=e)
+            raise await IngestFtpError.ftpAuthError(exception=e).send_notifications()
 
     # set encryption on data channel if able
     if hasattr(ftp, "prot_p"):

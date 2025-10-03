@@ -13,16 +13,16 @@ import logging
 import json
 from typing import List, Any, Dict, Optional
 
-from flask import request, current_app as app
-from eve.utils import config
 from eve.methods.common import serialize_value
-from flask_babel import _, lazy_gettext
-from superdesk.cache import cache
+from quart_babel import gettext as _, lazy_gettext
 
+from superdesk.resource_fields import ID_FIELD, ITEMS, LAST_UPDATED, DATE_CREATED
+from superdesk.flask import request
+from superdesk.cache import cache
 from superdesk import privilege, get_resource_service
 from superdesk.notification import push_notification
 from superdesk.resource import Resource
-from superdesk.services import BaseService
+from superdesk.eve_async.service import AsyncBaseService
 from superdesk.users import get_user_from_request
 from superdesk.utc import utcnow
 from superdesk.errors import SuperdeskApiError
@@ -51,6 +51,7 @@ vocab_schema = {
 
 
 class VocabulariesResource(Resource):
+    # internal_resource = True
     schema = {
         "_id": {
             "type": "string",
@@ -173,10 +174,10 @@ class VocabulariesResource(Resource):
     mongo_indexes = {"field_type": [("field_type", 1)]}
 
 
-class VocabulariesService(BaseService):
+class VocabulariesService(AsyncBaseService):
     system_keys = set(DEFAULT_SCHEMA.keys()).union(set(DEFAULT_EDITOR.keys()))
 
-    def _validate_items(self, update):
+    async def _validate_items_async(self, update):
         # if we have qcode and not unique_field set, we want it to be qcode
         try:
             update["schema"]["qcode"]
@@ -209,14 +210,14 @@ class VocabulariesService(BaseService):
                             payload = {"error": {"required_field": 1, "params": {"field": field, "item": index}}}
                             raise SuperdeskApiError.badRequestError(message=msg, payload=payload)
 
-    def on_create(self, docs):
+    async def on_create_async(self, docs):
         for doc in docs:
-            self._validate_items(doc)
+            await self._validate_items_async(doc)
 
             if doc.get("field_type") and doc["_id"] in self.system_keys:
                 raise SuperdeskApiError(message="{} is in use".format(doc["_id"]), payload={"_id": {"conflict": 1}})
 
-            if self.find_one(req=None, **{"_id": doc["_id"], "_deleted": True}):
+            if await self.find_one_async(req=None, **{"_id": doc["_id"], "_deleted": True}):
                 raise SuperdeskApiError(
                     message="{} is used by deleted vocabulary".format(doc["_id"]), payload={"_id": {"deleted": 1}}
                 )
@@ -225,12 +226,10 @@ class VocabulariesService(BaseService):
         for doc in docs:
             self._send_notification(doc, event="vocabularies:created")
 
-    def on_replace(self, document, original):
-        self._validate_items(document)
-        document[app.config["LAST_UPDATED"]] = utcnow()
-        document[app.config["DATE_CREATED"]] = (
-            original.get(app.config["DATE_CREATED"], utcnow()) if original else utcnow()
-        )
+    async def on_replace_async(self, document, original):
+        await self._validate_items_async(document)
+        document[LAST_UPDATED] = utcnow()
+        document[DATE_CREATED] = original.get(DATE_CREATED, utcnow()) if original else utcnow()
         logger.info("updating vocabulary item: %s", document["_id"])
 
     def on_fetched(self, doc):
@@ -244,7 +243,7 @@ class VocabulariesService(BaseService):
             if where_clause.get("type") == "manageable":
                 return doc
 
-        for item in doc[config.ITEMS]:
+        for item in doc[ITEMS]:
             self._filter_inactive_vocabularies(item)
             self._cast_items(item)
 
@@ -255,12 +254,12 @@ class VocabulariesService(BaseService):
         self._filter_inactive_vocabularies(doc)
         self._cast_items(doc)
 
-    def on_update(self, updates, original):
+    async def on_update_async(self, updates, original):
         """Checks the duplicates if a unique field is defined"""
         if "items" in updates:
             updated = deepcopy(original)
             updated.update(updates)
-            self._validate_items(updated)
+            await self._validate_items_async(updated)
         unique_field = original.get("unique_field")
         if unique_field:
             self._check_uniqueness(updates.get("items", []), unique_field)
@@ -336,11 +335,13 @@ class VocabulariesService(BaseService):
         push_notification(
             event,
             vocabulary=updated_vocabulary.get("display_name"),
-            user=str(user[config.ID_FIELD]) if user else None,
+            user=str(user[ID_FIELD]) if user else None,
             vocabulary_id=updated_vocabulary["_id"],
         )
 
     def get_rightsinfo(self, item):
+        # This function won't be needed once we use the VocabulariesService async service in it's place
+
         rights_key = item.get("source", item.get("original_source", "default"))
         all_rights = self.find_one(req=None, _id="rightsinfo")
         if not all_rights or not all_rights.get("items"):
@@ -364,9 +365,20 @@ class VocabulariesService(BaseService):
             return {}
 
     def get_extra_fields(self):
+        # This function won't be needed once we use the VocabulariesService async service in it's place
+
         return list(self.get_from_mongo(req=None, lookup={"field_type": {"$exists": True, "$ne": None}}))
 
+    async def get_extra_fields_async(self):
+        # This function won't be needed once we use the VocabulariesService async service in it's place
+
+        return await (
+            await self.get_from_mongo_async(req=None, lookup={"field_type": {"$exists": True, "$ne": None}})
+        ).to_list()
+
     def get_custom_vocabularies(self):
+        # This function won't be needed once we use the VocabulariesService async service in it's place
+
         return list(
             self.get_from_mongo(
                 req=None,
@@ -378,6 +390,8 @@ class VocabulariesService(BaseService):
         )
 
     def get_forbiden_custom_vocabularies(self):
+        # This function won't be needed once we use the VocabulariesService async service in it's place
+
         return list(
             self.get_from_mongo(
                 req=None,
@@ -404,10 +418,13 @@ class VocabulariesService(BaseService):
                     new_item[field] = values[language]
         return locale_vocabulary
 
-    def add_missing_keywords(self, keywords, language=None):
+    async def add_missing_keywords_async(self, keywords, language=None):
+        # This function won't be needed once we use the VocabulariesService async service in it's place
+        # Converted to async due to use of lifecycle methods (aka on_update_async)
+
         if not keywords:
             return
-        cv = self.find_one(req=None, _id=KEYWORDS_CV)
+        cv = await self.find_one_async(req=None, _id=KEYWORDS_CV)
         if cv:
             existing = {item["name"].lower() for item in cv.get("items", [])}
             missing = [keyword for keyword in keywords if keyword.lower() not in existing]
@@ -421,8 +438,8 @@ class VocabulariesService(BaseService):
                             "is_active": True,
                         }
                     )
-                self.on_update(updates, cv)
-                self.system_update(cv["_id"], updates, cv)
+                await self.on_update_async(updates, cv)
+                await self.system_update_async(cv["_id"], updates, cv)
                 self.on_updated(updates, cv)
         else:
             items = [
@@ -444,36 +461,18 @@ class VocabulariesService(BaseService):
                     "qcode": {},
                 },
             }
-            self.post([cv])
+            await self.post_async([cv])
 
     def get_article_cv_item(self, item, scheme):
         article_item = {k: v for k, v in item.items() if k not in ("is_active",)}
         article_item.update({"scheme": scheme})
         return article_item
 
-    def get_items(
-        self,
-        _id: str,
-        qcode: Optional[str] = None,
-        is_active: bool = True,
-        name: Optional[str] = None,
-        lang: Optional[str] = None,
-    ) -> List:
-        """
-        Return `items` with specified filters from the CV with specified `_id`.
-        If `lang` is provided then `name` is looked in `items.translations.name.{lang}`,
-        otherwise `name` is looked in `items.name`.
-
-        :param _id: custom vocabulary _id
-        :param qcode: items.qcode filter
-        :param is_active: items.is_active filter
-        :param name: items.name filter
-        :param lang: items.lang filter
-        :return: items list
-        """
-
-        projection: Dict[str, Any] = {}
-        lookup = {"_id": _id}
+    def _get_items_lookup_and_projection(
+        self, cv_id: str, qcode: str | None = None, name: str | None = None, lang: str | None = None
+    ) -> tuple[dict, dict]:
+        projection: dict = {}
+        lookup = {"_id": cv_id}
 
         if qcode:
             elem_match = projection.setdefault("items", {}).setdefault("$elemMatch", {})
@@ -495,38 +494,92 @@ class VocabulariesService(BaseService):
                 "$options": "i",
             }
 
+        return lookup, projection
+
+    def _get_items_response(self, scheme_id: str, items: list[dict], is_active: bool | None) -> list[dict]:
+        def format_item(item: dict):
+            item.pop("is_active", None)
+            item["scheme"] = scheme_id
+            return item
+
+        # $elemMatch projection contains only the first element matching the condition,
+        # that"s why `is_active` filter is filtered via python
+        return [format_item(item) for item in items if is_active is None or item.get("is_active") is is_active]
+
+    def get_items(
+        self,
+        _id: str,
+        qcode: str | None = None,
+        is_active: bool | None = True,
+        name: str | None = None,
+        lang: str | None = None,
+    ) -> list[dict]:
+        """
+        Return `items` with specified filters from the CV with specified `_id`.
+        If `lang` is provided then `name` is looked in `items.translations.name.{lang}`,
+        otherwise `name` is looked in `items.name`.
+
+        :param _id: custom vocabulary _id
+        :param qcode: items.qcode filter
+        :param is_active: items.is_active filter
+        :param name: items.name filter
+        :param lang: items.lang filter
+        :return: items list
+        """
+
+        lookup, projection = self._get_items_lookup_and_projection(_id, qcode, name, lang)
         cursor = self.get_from_mongo(req=None, lookup=lookup, projection=projection)
 
         try:
             items = cursor.next()["items"]
-        except (StopIteration, KeyError):
+        except (StopIteration, KeyError, TypeError):
             return []
 
-        # $elemMatch projection contains only the first element matching the condition,
-        # that"s why `is_active` filter is filtered via python
-        if is_active is not None:
-            items = [i for i in items if i.get("is_active", True) == is_active]
+        return self._get_items_response(_id, items, is_active)
 
-        def format_item(item):
-            try:
-                del item["is_active"]
-            except KeyError:
-                pass
-            item["scheme"] = _id
-            return item
+    async def get_items_async(
+        self,
+        _id: str,
+        qcode: str | None = None,
+        is_active: bool | None = True,
+        name: str | None = None,
+        lang: str | None = None,
+    ) -> list[dict]:
+        """
+        Return `items` with specified filters from the CV with specified `_id`.
+        If `lang` is provided then `name` is looked in `items.translations.name.{lang}`,
+        otherwise `name` is looked in `items.name`.
 
-        items = list(map(format_item, items))
+        :param _id: custom vocabulary _id
+        :param qcode: items.qcode filter
+        :param is_active: items.is_active filter
+        :param name: items.name filter
+        :param lang: items.lang filter
+        :return: items list
+        """
 
-        return items
+        lookup, projection = self._get_items_lookup_and_projection(_id, qcode, name, lang)
+        cursor = await self.get_from_mongo_async(req=None, lookup=lookup, projection=projection)
+
+        try:
+            items = (await cursor.next())["items"]
+        except (StopAsyncIteration, KeyError, TypeError):
+            return []
+
+        return self._get_items_response(_id, items, is_active)
 
     def get_languages(self):
+        # This function won't be needed once we use the VocabulariesService async service in it's place
         return self.get_items(_id="languages")
 
     def get_field_options(self, field) -> Dict:
+        # This function won't be needed once we use the VocabulariesService async service in it's place
+
         cv = self.find_one(req=None, _id=field)
         return cv and cv.get("field_options") or {}
 
 
+# TODO-ASYNC: Convert these next 2 to async when upgrading archive module
 @cache(ttl=3600, tags=("vocabularies",))
 def get_related_field_ids():
     return list(

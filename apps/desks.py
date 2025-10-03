@@ -13,21 +13,22 @@ import itertools
 from typing import Dict, Any, List
 
 import superdesk
-from flask import current_app as app, request
 
+from superdesk.core import get_app_config, get_current_app
+from superdesk.resource_fields import ID_FIELD
+from superdesk.flask import request
 from superdesk import get_resource_service
 from superdesk.errors import SuperdeskApiError
 from superdesk.resource import Resource
-from superdesk import config
 from superdesk.utils import SuperdeskBaseEnum
 from superdesk.timer import timer
 from bson.objectid import ObjectId
-from superdesk.services import BaseService
+from superdesk.eve_async.service import AsyncBaseService
 from superdesk.notification import push_notification
 from superdesk.activity import add_activity, ACTIVITY_UPDATE
 from superdesk.metadata.item import FAMILY_ID, ITEM_STATE, CONTENT_STATE
 from eve.utils import ParsedRequest
-from flask_babel import _, lazy_gettext
+from quart_babel import gettext as _, lazy_gettext
 
 
 logger = logging.getLogger(__name__)
@@ -124,10 +125,10 @@ class DesksResource(Resource):
     }
 
 
-class DesksService(BaseService):
+class DesksService(AsyncBaseService):
     notification_key = "desk"
 
-    def create(self, docs, **kwargs):
+    async def create_async(self, docs, **kwargs):
         """Creates new desk.
 
         Overriding to check if the desk being created has Working and Incoming Stages. If not then Working and Incoming
@@ -143,38 +144,39 @@ class DesksService(BaseService):
             self._ensure_unique_members(desk)
 
             if desk.get("content_expiry") == 0:
-                desk["content_expiry"] = app.settings["CONTENT_EXPIRY_MINUTES"]
+                desk["content_expiry"] = get_app_config("CONTENT_EXPIRY_MINUTES")
 
             if "working_stage" not in desk:
                 stages_to_be_linked_with_desk.append("working_stage")
-                stage_id = stage_service.create_working_stage()
+                stage_id = await stage_service.create_working_stage()
                 desk["working_stage"] = stage_id[0]
 
             if "incoming_stage" not in desk:
                 stages_to_be_linked_with_desk.append("incoming_stage")
-                stage_id = stage_service.create_incoming_stage()
+                stage_id = await stage_service.create_incoming_stage()
                 desk["incoming_stage"] = stage_id[0]
 
             desk.setdefault("desk_type", DeskTypes.authoring.value)
-            super().create([desk], **kwargs)
+            await super().create_async([desk], **kwargs)
             for stage_type in stages_to_be_linked_with_desk:
-                stage_service.patch(desk[stage_type], {"desk": desk[config.ID_FIELD]})
+                await stage_service.patch_async(desk[stage_type], {"desk": desk[ID_FIELD]})
 
             # make the desk available in default content template
             content_templates = get_resource_service("content_templates")
-            template = content_templates.find_one(req=None, _id=desk.get("default_content_template"))
+            template = await content_templates.find_one_async(req=None, _id=desk.get("default_content_template"))
             if template:
-                template.setdefault("template_desks", []).append(desk.get(config.ID_FIELD))
-                content_templates.patch(desk.get("default_content_template"), template)
+                template.setdefault("template_desks", []).append(desk.get(ID_FIELD))
+                await content_templates.patch_async(desk.get("default_content_template"), template)
 
-        return [doc[config.ID_FIELD] for doc in docs]
+        return [doc[ID_FIELD] for doc in docs]
 
-    def on_created(self, docs):
+    async def on_created_async(self, docs):
+        user_service = get_resource_service("users")
         for doc in docs:
-            push_notification(self.notification_key, created=1, desk_id=str(doc.get(config.ID_FIELD)))
-            get_resource_service("users").update_stage_visibility_for_users()
+            push_notification(self.notification_key, created=1, desk_id=str(doc.get(ID_FIELD)))
+            await user_service.update_stage_visibility_for_users_async()
 
-    def on_update(self, updates, original):
+    async def on_update_async(self, updates, original):
         if updates.get("content_expiry") == 0:
             updates["content_expiry"] = None
 
@@ -183,8 +185,8 @@ class DesksService(BaseService):
         if updates.get("desk_type") and updates.get("desk_type") != original.get("desk_type", ""):
             archive_versions_query = {
                 "$or": [
-                    {"task.last_authoring_desk": str(original[config.ID_FIELD])},
-                    {"task.last_production_desk": str(original[config.ID_FIELD])},
+                    {"task.last_authoring_desk": str(original[ID_FIELD])},
+                    {"task.last_production_desk": str(original[ID_FIELD])},
                 ]
             }
 
@@ -200,10 +202,10 @@ class DesksService(BaseService):
             # ensuring that members list is unique
             doc["members"] = [{"user": user} for user in {member.get("user") for member in doc.get("members")}]
 
-    def on_updated(self, updates, original):
-        self.__send_notification(updates, original)
+    async def on_updated_async(self, updates, original):
+        await self.__send_notification(updates, original)
 
-    def on_delete(self, desk):
+    async def on_delete_async(self, desk):
         """Runs on desk delete.
 
         Overriding to prevent deletion of a desk if the desk meets one of the below conditions:
@@ -212,29 +214,28 @@ class DesksService(BaseService):
             3. The desk is associated with routing rule(s)
         """
 
-        as_default_desk = superdesk.get_resource_service("users").get(req=None, lookup={"desk": desk[config.ID_FIELD]})
-        if as_default_desk and as_default_desk.count():
+        if await get_resource_service("users").count_async({"desk": desk[ID_FIELD]}):
             raise SuperdeskApiError.preconditionFailedError(
                 message=_("Cannot delete desk as it is assigned as default desk to user(s).")
             )
 
         routing_rules_query = {
             "$or": [
-                {"rules.actions.fetch.desk": desk[config.ID_FIELD]},
-                {"rules.actions.publish.desk": desk[config.ID_FIELD]},
+                {"rules.actions.fetch.desk": desk[ID_FIELD]},
+                {"rules.actions.publish.desk": desk[ID_FIELD]},
             ]
         }
-        routing_rules = superdesk.get_resource_service("routing_schemes").get(req=None, lookup=routing_rules_query)
-        if routing_rules and routing_rules.count():
+        routing_rule_count = await superdesk.get_resource_service("routing_schemes").count_async(routing_rules_query)
+        if routing_rule_count > 0:
             raise SuperdeskApiError.preconditionFailedError(
                 message=_("Cannot delete desk as routing scheme(s) are associated with the desk")
             )
 
         archive_versions_query = {
             "$or": [
-                {"task.desk": str(desk[config.ID_FIELD])},
-                {"task.last_authoring_desk": str(desk[config.ID_FIELD])},
-                {"task.last_production_desk": str(desk[config.ID_FIELD])},
+                {"task.desk": str(desk[ID_FIELD])},
+                {"task.last_authoring_desk": str(desk[ID_FIELD])},
+                {"task.last_production_desk": str(desk[ID_FIELD])},
             ]
         }
 
@@ -244,29 +245,17 @@ class DesksService(BaseService):
                 message=_("Cannot delete desk as it has article(s) or referenced by versions of the article(s).")
             )
 
-    def add_member(self, desk_id, user_id):
-        desk = self.find_one(req=None, _id=desk_id)
-        if not desk:
-            raise ValueError('desk "{}" not found'.format(desk_id))
-        members = desk.get("members", [])
-        members.append({"user": user_id})
-        updates = {"members": members}
-        self.on_update(updates, desk)
-        self.system_update(desk["_id"], updates, desk)
-
-    def delete(self, lookup):
+    async def delete_async(self, lookup):
         """
         Overriding to delete stages before deleting a desk
         """
 
-        superdesk.get_resource_service("stages").delete(lookup={"desk": lookup.get(config.ID_FIELD)})
-        super().delete(lookup)
+        await superdesk.get_resource_service("stages").delete_async(lookup={"desk": lookup.get(ID_FIELD)})
+        await super().delete_async(lookup)
 
-    def on_deleted(self, doc):
+    async def on_deleted_async(self, doc):
         desk_user_ids = [str(member["user"]) for member in doc.get("members", [])]
-        push_notification(
-            self.notification_key, deleted=1, user_ids=desk_user_ids, desk_id=str(doc.get(config.ID_FIELD))
-        )
+        push_notification(self.notification_key, deleted=1, user_ids=desk_user_ids, desk_id=str(doc.get(ID_FIELD)))
 
     def __compare_members(self, original, updates):
         original_members = set([member["user"] for member in original])
@@ -275,9 +264,9 @@ class DesksService(BaseService):
         removed = original_members - updates_members
         return added, removed
 
-    def __send_notification(self, updates, desk):
-        desk_id = desk[config.ID_FIELD]
-        users_service = superdesk.get_resource_service("users")
+    async def __send_notification(self, updates, desk):
+        desk_id = desk[ID_FIELD]
+        users_service = get_resource_service("users")
 
         if "members" in updates:
             added, removed = self.__compare_members(desk.get("members", {}), updates["members"])
@@ -287,8 +276,8 @@ class DesksService(BaseService):
                 )
 
             for added_user in added:
-                user = users_service.find_one(req=None, _id=added_user)
-                activity = add_activity(
+                user = await users_service.find_one_async(req=None, _id=added_user)
+                activity = await add_activity(
                     ACTIVITY_UPDATE,
                     "user {{user}} has been added to desk {{desk}}: Please re-login.",
                     self.datasource,
@@ -298,15 +287,16 @@ class DesksService(BaseService):
                     desk=desk.get("name"),
                 )
                 push_notification("activity", _dest=activity["recipients"])
-                users_service.update_stage_visibility_for_user(user)
+                await users_service.update_stage_visibility_for_user_async(user)
 
             for removed_user in removed:
-                user = users_service.find_one(req=None, _id=removed_user)
-                users_service.update_stage_visibility_for_user(user)
+                user = await users_service.find_one_async(req=None, _id=removed_user)
+                await users_service.update_stage_visibility_for_user_async(user)
 
         else:
-            push_notification(self.notification_key, updated=1, desk_id=str(desk.get(config.ID_FIELD)))
+            push_notification(self.notification_key, updated=1, desk_id=str(desk.get(ID_FIELD)))
 
+    # TODO-ASYNC: Remove this once is't no longer used anywhere
     def get_desk_name(self, desk_id):
         """Return the item desk.
 
@@ -314,24 +304,35 @@ class DesksService(BaseService):
         :return dict: desk document
         """
         desk_name = ""
-        desk = get_resource_service("desks").find_one(req=None, _id=desk_id)
+        desk = self.find_one(req=None, _id=desk_id)
         if desk:
             desk_name = desk.get("name") or ""
 
         return desk_name
 
-    def on_fetched(self, res):
+    async def get_desk_name_async(self, desk_id):
+        """Return the item desk.
+
+        :param desk_id:
+        :return dict: desk document
+        """
+        desk_name = ""
+        desk = await self.find_one_async(req=None, _id=desk_id)
+        if desk:
+            desk_name = desk.get("name") or ""
+
+        return desk_name
+
+    async def on_fetched_async(self, res):
         members_set = set()
-        db_users = app.data.mongo.pymongo("users").db["users"]
+        db_users = get_current_app().data.mongo_async.pymongo("users").db["users"]
 
         # find display_name from the users document for each member in desks document
         for desk in res["_items"]:
             if "members" in desk:
-                users = tuple(
-                    db_users.find(
-                        {"_id": {"$in": [member["user"] for member in desk.get("members", [])]}}, {"display_name": 1}
-                    )
-                )
+                users = await db_users.find(
+                    {"_id": {"$in": [member["user"] for member in desk.get("members", [])]}}, {"display_name": 1}
+                ).to_list()
                 members_set |= {(m["_id"], m["display_name"]) for m in users}
 
         if members_set:
@@ -358,19 +359,18 @@ class UserDesksResource(Resource):
     resource_methods = ["GET"]
 
 
-class UserDesksService(BaseService):
-    def get(self, req, lookup):
+class UserDesksService(AsyncBaseService):
+    async def get_async(self, req, lookup):
         if lookup.get("user_id"):
             lookup["members.user"] = ObjectId(lookup["user_id"])
             del lookup["user_id"]
-        return super().get(req, lookup)
+        return await super().get_async(req, lookup)
 
-    def is_member(self, user_id, desk_id):
-        # desk = list(self.get(req=None, lookup={'members.user':ObjectId(user_id), '_id': ObjectId(desk_id)}))
-        return len(list(self.get(req=None, lookup={"members.user": ObjectId(user_id), "_id": ObjectId(desk_id)}))) > 0
+    async def is_member(self, user_id, desk_id):
+        return await self.count_async({"members.user": ObjectId(user_id), "_id": ObjectId(desk_id)}) > 0
 
-    def get_by_user(self, user_id):
-        return list(self.get(req=None, lookup={"user_id": user_id}))
+    async def get_by_user(self, user_id):
+        return await (await self.get_async(req=None, lookup={"user_id": user_id})).to_list()
 
 
 class DeskUsersResource(Resource):
@@ -396,17 +396,17 @@ class DeskUsersResource(Resource):
     resource_methods = ["GET"]
 
 
-class DeskUsersService(BaseService):
-    def get(self, req, lookup):
+class DeskUsersService(AsyncBaseService):
+    async def get_async(self, req, lookup):
         desk_id = lookup.pop("desk_id", None)
         desks_service = superdesk.get_resource_service("desks")
         if desk_id:
-            desk = desks_service.find_one(req=None, _id=ObjectId(desk_id))
+            desk = await desks_service.find_one_async(req=None, _id=ObjectId(desk_id))
             if desk and desk.get("members"):
                 lookup["_id"] = {"$in": [member["user"] for member in desk.get("members", [])]}
             else:
                 lookup["_id"] = ""  # return empty result
-        return super().get(req, lookup)
+        return await super().get_async(req, lookup)
 
 
 class SluglineDesksResource(Resource):
@@ -431,7 +431,7 @@ class SluglineDesksResource(Resource):
     }
 
 
-class SluglineDeskService(BaseService):
+class SluglineDeskService(AsyncBaseService):
     SLUGLINE = "slugline"
     OLD_SLUGLINES = "old_sluglines"
     VERSION_CREATED = "versioncreated"
@@ -452,7 +452,7 @@ class SluglineDeskService(BaseService):
         else:
             return article.get(self.SLUGLINE, "")
 
-    def get(self, req, lookup):
+    async def get_async(self, req, lookup):
         """Return desk item summary.
 
         Given the desk the function will return a summary of the sluglines and headlines published from that
@@ -466,13 +466,13 @@ class SluglineDeskService(BaseService):
         lookup["task.desk"] = lookup["desk_id"]
         lookup.pop("desk_id")
         req.max_results = 1000
-        desk_items = super().get(req, lookup)
+        desk_items = await super().get_async(req, lookup)
 
         # domestic docs
         docs = []
         # rest of the world docs
         row_docs = []
-        for item in desk_items:
+        async for item in desk_items:
             slugline = self._get_slugline_with_legal(item)
             headline = item.get(self.HEADLINE)
             versioncreated = item.get(self.VERSION_CREATED)
@@ -486,7 +486,7 @@ class SluglineDeskService(BaseService):
             else:
                 row = False
             # Find if there are other sluglines in this items family
-            newer, older_slugline = self._find_other_sluglines(
+            newer, older_slugline = await self._find_other_sluglines(
                 item.get(FAMILY_ID), slugline, item.get(self.VERSION_CREATED), lookup["task.desk"]
             )
             # there are no newer sluglines than the current one
@@ -526,16 +526,18 @@ class SluglineDeskService(BaseService):
         places.append(
             {
                 self.NAME: placename,
-                self.SLUGLINE: slugline
-                if not any(self._get_slugline_with_legal(p).lower() == slugline.lower() for p in places)
-                else "-",
+                self.SLUGLINE: (
+                    slugline
+                    if not any(self._get_slugline_with_legal(p).lower() == slugline.lower() for p in places)
+                    else "-"
+                ),
                 self.HEADLINE: headline,
                 self.OLD_SLUGLINES: old_sluglines,
                 self.VERSION_CREATED: versioncreated,
             }
         )
 
-    def _find_other_sluglines(self, family_id, slugline, versioncreated, desk_id):
+    async def _find_other_sluglines(self, family_id, slugline, versioncreated, desk_id):
         """Find other sluglines.
 
         This function given a family_id will return a tuple with the first value true if there is
@@ -563,8 +565,8 @@ class SluglineDeskService(BaseService):
             }
         }
         req.args = {"source": json.dumps(query), "aggregations": 0}
-        family = superdesk.get_resource_service("published").get(req=req, lookup=None)
-        for member in family:
+        family = await superdesk.get_resource_service("published").get_async(req=req, lookup=None)
+        async for member in family:
             member_slugline = self._get_slugline_with_legal(member)
             if member_slugline.lower() != slugline.lower():
                 if member.get("versioncreated") < versioncreated:
@@ -593,16 +595,16 @@ class OverviewResource(Resource):
     datasource = {"projection": {"_items": 1}}
 
 
-class OverviewService(BaseService):
+class OverviewService(AsyncBaseService):
     """Aggregate count of items per stage or status"""
 
-    def _do_request(self, doc):
+    async def _do_request(self, doc):
         desk_id = request.view_args["desk_id"]
         agg_type = request.view_args["agg_type"]
         timer_label = f"{agg_type} overview aggregation {desk_id!r}"
         if agg_type == "users":
             with timer(timer_label):
-                doc["_items"] = self._users_aggregation(desk_id)
+                doc["_items"] = await self._users_aggregation(desk_id)
             return
 
         if agg_type == "stages":
@@ -665,7 +667,7 @@ class OverviewService(BaseService):
             agg_query["aggs"]["overview"]["aggs"] = {"top_docs": {"top_hits": {"size": 100}}}
 
         with timer(timer_label):
-            response = app.data.elastic.search(agg_query, collection, params={"size": 0})
+            response = get_current_app().data.elastic.search(agg_query, collection, params={"size": 0})
 
         doc["_items"] = [
             {
@@ -682,14 +684,14 @@ class OverviewService(BaseService):
                 for hit_doc in bucket["top_docs"]["hits"]["hits"]:
                     docs.append(hit_doc["_source"])
 
-    def on_fetched(self, doc):
-        self._do_request(doc)
+    async def on_fetched_async(self, doc):
+        await self._do_request(doc)
 
-    def create(self, docs, **kwargs):
-        self._do_request(docs[0])
+    async def create_async(self, docs, **kwargs):
+        await self._do_request(docs[0])
         return [0]
 
-    def _users_aggregation(self, desk_id: str) -> List[Dict]:
+    async def _users_aggregation(self, desk_id: str) -> List[Dict]:
         desks_service = superdesk.get_resource_service("desks")
 
         es_query: Dict[str, Any]
@@ -705,16 +707,21 @@ class OverviewService(BaseService):
 
         req = ParsedRequest()
         req.projection = json.dumps({"members": 1})
-        found = desks_service.get(req, desk_filter)
+        found = await desks_service.get_async(req, desk_filter)
         members = set()
-        for d in found:
+        async for d in found:
             members.update({m["user"] for m in d.get("members", [])})
 
-        users_aggregation = app.data.pymongo().db.users.aggregate(
-            [
-                {"$match": {"_id": {"$in": list(members)}}},
-                {"$group": {"_id": "$role", "authors": {"$addToSet": "$_id"}}},
-            ]
+        app = get_current_app()
+        users_aggregation = (
+            app.data.mongo_async.pymongo("users")
+            .db["users"]
+            .aggregate(
+                [
+                    {"$match": {"_id": {"$in": list(members)}}},
+                    {"$group": {"_id": "$role", "authors": {"$addToSet": "$_id"}}},
+                ]
+            )
         )
 
         # only do aggregations on content accesible by user
@@ -776,7 +783,7 @@ class OverviewService(BaseService):
                 stats_by_authors.setdefault(a["key"], {"locked": 0})["assigned"] = a["doc_count"]
 
         overview = []
-        for a in users_aggregation:
+        async for a in users_aggregation:
             role = a["_id"]
             authors_dict: Dict[str, Any] = {}
             role_dict = {
@@ -796,17 +803,18 @@ class OverviewService(BaseService):
         return overview
 
 
-def remove_profile_from_desks(item):
+async def remove_profile_from_desks_async(item):
     """Removes the profile data from desks that are using the profile
 
     :param item: deleted content profile
     """
     req = ParsedRequest()
-    desks = list(superdesk.get_resource_service("desks").get(req=req, lookup={}))
-    for desk in desks:
-        if desk.get("default_content_profile") == str(item.get(config.ID_FIELD)):
+    service = superdesk.get_resource_service("desks")
+    desks = await service.get_async(req=req, lookup={})
+    async for desk in desks:
+        if desk.get("default_content_profile") == str(item.get(ID_FIELD)):
             desk["default_content_profile"] = None
-            superdesk.get_resource_service("desks").patch(desk[config.ID_FIELD], desk)
+            await service.patch_async(desk[ID_FIELD], desk)
 
 
 def format_buckets(aggs):

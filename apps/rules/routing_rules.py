@@ -9,19 +9,21 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 import logging
-import superdesk
 
 import pytz
 from pytz import all_timezones_set
 
 from enum import Enum
 from datetime import datetime, timedelta
+
+from superdesk.resource_fields import ID_FIELD
 from superdesk.resource import Resource
-from superdesk.services import BaseService
+from superdesk.eve_async import AsyncBaseService
 from superdesk.errors import SuperdeskApiError
-from eve.utils import config
 from superdesk.utc import set_time
-from flask_babel import _
+from quart_babel import gettext as _
+from superdesk.publish_async.publish_cache import PublishCache
+from superdesk.publish_async.utils import item_matches_content_filter
 
 from .rule_handlers import get_routing_rule_handler
 
@@ -145,12 +147,12 @@ class RoutingRuleSchemeResource(Resource):
     }
 
 
-class RoutingRuleSchemeService(BaseService):
+class RoutingRuleSchemeService(AsyncBaseService):
     """
     Service class for 'routing_schemes' endpoint.
     """
 
-    def on_create(self, docs):
+    async def on_create_async(self, docs):
         """Overriding to check the below pre-conditions:
 
             1. A routing scheme must have at least one rule.
@@ -163,7 +165,7 @@ class RoutingRuleSchemeService(BaseService):
             self._validate_routing_scheme(routing_scheme)
             self._check_if_rule_name_is_unique(routing_scheme)
 
-    def on_update(self, updates, original):
+    async def on_update_async(self, updates, original):
         """Overriding to check the below pre-conditions:
 
             1. A routing scheme must have at least one rule.
@@ -175,7 +177,7 @@ class RoutingRuleSchemeService(BaseService):
         self._validate_routing_scheme(updates)
         self._check_if_rule_name_is_unique(updates)
 
-    def on_delete(self, doc):
+    async def on_delete_async(self, doc):
         """Overriding to check the below pre-conditions:
 
             1. A routing scheme shouldn't be associated with an Ingest Provider.
@@ -183,10 +185,10 @@ class RoutingRuleSchemeService(BaseService):
         Will throw BadRequestError if any of the pre-conditions fail.
         """
 
-        if self.backend.find_one("ingest_providers", req=None, routing_scheme=doc[config.ID_FIELD]):
+        if await self.backend.find_one_async("ingest_providers", req=None, routing_scheme=doc[ID_FIELD]):
             raise SuperdeskApiError.forbiddenError(_("Routing scheme is applied to channel(s). It cannot be deleted."))
 
-    def apply_routing_scheme(self, ingest_item, provider, routing_scheme):
+    async def apply_routing_scheme(self, ingest_item, provider, routing_scheme):
         """Applies routing scheme and applies appropriate action (fetch, publish) to the item
 
         :param item: ingest item to which routing scheme needs to applied.
@@ -200,10 +202,9 @@ class RoutingRuleSchemeService(BaseService):
                 % (provider.get("name"), routing_scheme.get("name"))
             )
 
-        filters_service = superdesk.get_resource_service("content_filters")
-
         now = datetime.utcnow()
         item_id = ingest_item.get("guid") or ingest_item.get("_id")
+        await PublishCache.init()
 
         for rule in self._get_scheduled_routing_rules(rules, now):
             content_filter = rule.get("filter", {})
@@ -213,18 +214,18 @@ class RoutingRuleSchemeService(BaseService):
             )
 
             rule_handler = get_routing_rule_handler(rule)
-            if not rule_handler.can_handle(rule, ingest_item, routing_scheme):
+            if not await rule_handler.can_handle(rule, ingest_item, routing_scheme):
                 logger.info(
                     "Routing rule %s of Routing Scheme %s for Provider %s does not support item %s"
                     % (rule.get("name"), routing_scheme.get("name"), provider.get("name"), item_id)
                 )
-            elif filters_service.does_match(content_filter, ingest_item):
+            elif item_matches_content_filter(ingest_item, content_filter):
                 logger.info(
                     "Filter matched. Item: %s. Routing Scheme: %s. Rule Name %s."
                     % (item_id, routing_scheme.get("name"), rule.get("name"))
                 )
 
-                rule_handler.apply_rule(rule, ingest_item, routing_scheme)
+                await rule_handler.apply_rule(rule, ingest_item, routing_scheme)
                 if rule.get("actions", {}).get("exit", False):
                     logger.info(
                         "Exiting routing scheme. Item: %s . Routing Scheme: %s. "

@@ -13,20 +13,27 @@ import logging
 import json
 from eve.utils import ParsedRequest
 from eve.versioning import resolve_document_version
-from flask import request
-from apps.archive.common import CUSTOM_HATEOAS, insert_into_versions, get_user, ITEM_CREATE, BROADCAST_GENRE, is_genre
+
+from superdesk.resource_fields import ID_FIELD
+from superdesk.flask import request
+from apps.archive.common import (
+    CUSTOM_HATEOAS,
+    insert_into_versions_async,
+    get_user,
+    ITEM_CREATE,
+    BROADCAST_GENRE,
+    is_genre,
+)
 from apps.packages import PackageService
-from superdesk.metadata.packages import GROUPS
 from superdesk.resource import Resource, build_custom_hateoas
-from superdesk.services import BaseService
+from superdesk.eve_async import AsyncBaseService, ElasticAsyncEveCursor
 from superdesk.metadata.utils import item_url
 from superdesk.metadata.item import CONTENT_TYPE, CONTENT_STATE, ITEM_TYPE, ITEM_STATE, PUBLISH_STATES, metadata_schema
-from superdesk import get_resource_service, config
+from superdesk import get_resource_service
 from superdesk.errors import SuperdeskApiError
 from apps.archive.archive import SOURCE
 from apps.publish.content.common import ITEM_CORRECT, ITEM_PUBLISH
-from superdesk.utc import utcnow
-from flask_babel import _
+from quart_babel import gettext as _
 
 
 logger = logging.getLogger(__name__)
@@ -55,13 +62,13 @@ class ArchiveBroadcastResource(Resource):
     privileges = {"POST": ARCHIVE_BROADCAST_NAME}
 
 
-class ArchiveBroadcastService(BaseService):
+class ArchiveBroadcastService(AsyncBaseService):
     packageService = PackageService()
 
-    def create(self, docs):
+    async def create_async(self, docs):
         service = get_resource_service(SOURCE)
         item_id = request.view_args["item_id"]
-        item = service.find_one(req=None, _id=item_id)
+        item = await service.find_one_async(req=None, _id=item_id)
         doc = docs[0]
 
         self._valid_broadcast_item(item)
@@ -70,16 +77,16 @@ class ArchiveBroadcastService(BaseService):
         desk = None
 
         if desk_id:
-            desk = get_resource_service("desks").find_one(req=None, _id=desk_id)
+            desk = await get_resource_service("desks").find_one_async(req=None, _id=desk_id)
 
         doc.pop("desk", None)
         doc["task"] = {}
         if desk:
-            doc["task"]["desk"] = desk.get(config.ID_FIELD)
+            doc["task"]["desk"] = desk.get(ID_FIELD)
             doc["task"]["stage"] = desk.get("working_stage")
 
         doc["task"]["user"] = get_user().get("_id")
-        genre_list = get_resource_service("vocabularies").find_one(req=None, _id="genre") or {}
+        genre_list = await get_resource_service("vocabularies").find_one_async(req=None, _id="genre") or {}
         broadcast_genre = [
             {"qcode": genre.get("qcode"), "name": genre.get("name")}
             for genre in genre_list.get("items", [])
@@ -100,10 +107,10 @@ class ArchiveBroadcastService(BaseService):
             doc[key] = item.get(key)
 
         resolve_document_version(document=doc, resource=SOURCE, method="POST")
-        service.post(docs)
-        insert_into_versions(id_=doc[config.ID_FIELD])
+        await service.post_async(docs)
+        await insert_into_versions_async(id_=doc[ID_FIELD])
         build_custom_hateoas(CUSTOM_HATEOAS, doc)
-        return [doc[config.ID_FIELD]]
+        return [doc[ID_FIELD]]
 
     def _valid_broadcast_item(self, item):
         """Validates item for broadcast.
@@ -122,7 +129,7 @@ class ArchiveBroadcastService(BaseService):
         if item.get(ITEM_STATE) not in [CONTENT_STATE.CORRECTED, CONTENT_STATE.PUBLISHED]:
             raise SuperdeskApiError.badRequestError(message=_("Invalid content state."))
 
-    def _get_broadcast_items(self, ids, include_archived_repo=False):
+    async def _get_broadcast_items(self, ids, include_archived_repo=False) -> ElasticAsyncEveCursor:
         """Returns list of broadcast items.
 
         Get the broadcast items for the master_id
@@ -148,9 +155,9 @@ class ArchiveBroadcastService(BaseService):
             repos = "archive,published,archived"
 
         req.args = {"source": json.dumps(query), "repo": repos}
-        return get_resource_service("search").get(req=req, lookup=None)
+        return await get_resource_service("search").get_async(req=req, lookup=None)
 
-    def get_broadcast_items_from_master_story(self, item, include_archived_repo=False):
+    async def get_broadcast_items_from_master_story(self, item, include_archived_repo=False):
         """Get the broadcast items from the master story.
 
         :param dict item: master story item
@@ -160,10 +167,10 @@ class ArchiveBroadcastService(BaseService):
         if is_genre(item, BROADCAST_GENRE):
             return []
 
-        ids = [str(item.get(config.ID_FIELD))]
-        return list(self._get_broadcast_items(ids, include_archived_repo))
+        ids = [str(item.get(ID_FIELD))]
+        return await (await self._get_broadcast_items(ids, include_archived_repo)).to_list()
 
-    def on_broadcast_master_updated(self, item_event, item, rewrite_id=None):
+    async def on_broadcast_master_updated(self, item_event, item, rewrite_id=None):
         """Runs when master item is updated.
 
         This event is called when the master story is corrected, published, re-written
@@ -184,7 +191,7 @@ class ArchiveBroadcastService(BaseService):
         elif item_event == ITEM_CORRECT:
             status = "Master Story Corrected"
 
-        broadcast_items = self.get_broadcast_items_from_master_story(item)
+        broadcast_items = await self.get_broadcast_items_from_master_story(item)
 
         if not broadcast_items:
             return
@@ -205,16 +212,16 @@ class ArchiveBroadcastService(BaseService):
                 if not updates["broadcast"]["rewrite_id"] and rewrite_id:
                     updates["broadcast"]["rewrite_id"] = rewrite_id
 
-                if not broadcast_item.get(config.ID_FIELD) in processed_ids:
-                    self._update_broadcast_status(broadcast_item, updates)
+                if not broadcast_item.get(ID_FIELD) in processed_ids:
+                    await self._update_broadcast_status(broadcast_item, updates)
                     # list of ids that are processed.
-                    processed_ids.add(broadcast_item.get(config.ID_FIELD))
+                    processed_ids.add(broadcast_item.get(ID_FIELD))
             except Exception:
                 logger.exception(
-                    "Failed to update status for the broadcast item {}".format(broadcast_item.get(config.ID_FIELD))
+                    "Failed to update status for the broadcast item {}".format(broadcast_item.get(ID_FIELD))
                 )
 
-    def _update_broadcast_status(self, item, updates):
+    async def _update_broadcast_status(self, item, updates):
         """Update the status of the broadcast item.
 
         :param dict item: broadcast item to be updated
@@ -227,14 +234,14 @@ class ArchiveBroadcastService(BaseService):
             CONTENT_STATE.KILLED,
             CONTENT_STATE.RECALLED,
         }:
-            get_resource_service("published").update_published_items(
-                item.get(config.ID_FIELD), "broadcast", updates.get("broadcast")
+            await get_resource_service("published").update_published_items(
+                item.get(ID_FIELD), "broadcast", updates.get("broadcast")
             )
 
-        archive_item = get_resource_service(SOURCE).find_one(req=None, _id=item.get(config.ID_FIELD))
-        get_resource_service(SOURCE).system_update(archive_item.get(config.ID_FIELD), updates, archive_item)
+        archive_item = await get_resource_service(SOURCE).find_one_async(req=None, _id=item.get(ID_FIELD))
+        await get_resource_service(SOURCE).system_update_async(archive_item.get(ID_FIELD), updates, archive_item)
 
-    def remove_rewrite_refs(self, item):
+    async def remove_rewrite_refs(self, item):
         """Remove the rewrite references from the broadcast item if the re-write is spiked.
 
         :param dict item: Re-written article of the original story
@@ -247,7 +254,7 @@ class ArchiveBroadcastService(BaseService):
                 "bool": {
                     "filter": [
                         {"term": {"genre.name": BROADCAST_GENRE}},
-                        {"term": {"broadcast.rewrite_id": item.get(config.ID_FIELD)}},
+                        {"term": {"broadcast.rewrite_id": item.get(ID_FIELD)}},
                     ]
                 }
             }
@@ -255,9 +262,8 @@ class ArchiveBroadcastService(BaseService):
 
         req = ParsedRequest()
         req.args = {"source": json.dumps(query)}
-        broadcast_items = list(get_resource_service(SOURCE).get(req=req, lookup=None))
-
-        for broadcast_item in broadcast_items:
+        broadcast_items = await get_resource_service(SOURCE).get_async(req=req, lookup=None)
+        async for broadcast_item in broadcast_items:
             try:
                 updates = {"broadcast": broadcast_item.get("broadcast", {})}
 
@@ -266,13 +272,13 @@ class ArchiveBroadcastService(BaseService):
                 if "Re-written" in updates["broadcast"]["status"]:
                     updates["broadcast"]["status"] = ""
 
-                self._update_broadcast_status(broadcast_item, updates)
+                await self._update_broadcast_status(broadcast_item, updates)
             except Exception:
                 logger.exception(
-                    "Failed to remove rewrite id for the broadcast item {}".format(broadcast_item.get(config.ID_FIELD))
+                    "Failed to remove rewrite id for the broadcast item {}".format(broadcast_item.get(ID_FIELD))
                 )
 
-    def reset_broadcast_status(self, updates, original):
+    async def reset_broadcast_status(self, updates, original):
         """Reset the broadcast status if the broadcast item is updated.
 
         :param dict updates: updates to the original document
@@ -284,87 +290,31 @@ class ArchiveBroadcastService(BaseService):
             }
 
             broadcast_updates["broadcast"]["status"] = ""
-            self._update_broadcast_status(original, broadcast_updates)
+            await self._update_broadcast_status(original, broadcast_updates)
             updates.update(broadcast_updates)
 
-    def spike_item(self, original):
+    async def spike_item(self, original):
         """If Original item is re-write then it will remove the reference from the broadcast item.
 
         :param: dict original: original document
         """
         broadcast_items = [
             item
-            for item in self.get_broadcast_items_from_master_story(original)
+            for item in await self.get_broadcast_items_from_master_story(original)
             if item.get(ITEM_STATE) not in PUBLISH_STATES
         ]
         spike_service = get_resource_service("archive_spike")
 
         for item in broadcast_items:
-            id_ = item.get(config.ID_FIELD)
+            id_ = item.get(ID_FIELD)
             try:
-                self.packageService.remove_spiked_refs_from_package(id_)
+                await self.packageService.remove_spiked_refs_from_package_async(id_)
                 updates = {ITEM_STATE: CONTENT_STATE.SPIKED}
                 resolve_document_version(updates, SOURCE, "PATCH", item)
-                spike_service.patch(id_, updates)
-                insert_into_versions(id_=id_)
+                await spike_service.patch_async(id_, updates)
+                await insert_into_versions_async(id_=id_)
             except Exception:
                 logger.exception(message="Failed to spike the related broadcast item {}.".format(id_))
 
         if original.get("rewrite_of") and original.get(ITEM_STATE) not in PUBLISH_STATES:
-            self.remove_rewrite_refs(original)
-
-    def kill_broadcast(self, updates, original, operation):
-        """Kill the broadcast items
-
-        :param dict updates: Updates to the item
-        :param dict original: original item
-        :param str operation: Kill or Takedown operation
-        :return:
-        """
-        broadcast_items = [
-            item
-            for item in self.get_broadcast_items_from_master_story(original)
-            if item.get(ITEM_STATE) in PUBLISH_STATES
-        ]
-
-        correct_service = get_resource_service("archive_correct")
-        kill_service = get_resource_service("archive_{}".format(operation))
-
-        for item in broadcast_items:
-            item_id = item.get(config.ID_FIELD)
-            packages = self.packageService.get_packages(item_id)
-
-            processed_packages = set()
-            for package in packages:
-                if (
-                    str(package[config.ID_FIELD]) in processed_packages
-                    or package.get(ITEM_STATE) == CONTENT_STATE.RECALLED
-                ):
-                    continue
-                try:
-                    if package.get(ITEM_STATE) in {CONTENT_STATE.PUBLISHED, CONTENT_STATE.CORRECTED}:
-                        package_updates = {
-                            config.LAST_UPDATED: utcnow(),
-                            GROUPS: self.packageService.remove_group_ref(package, item_id),
-                        }
-
-                        refs = self.packageService.get_residrefs(package_updates)
-                        if refs:
-                            correct_service.patch(package.get(config.ID_FIELD), package_updates)
-                        else:
-                            package_updates["body_html"] = updates.get("body_html", "")
-                            kill_service.patch(package.get(config.ID_FIELD), package_updates)
-
-                        processed_packages.add(package.get(config.ID_FIELD))
-                    else:
-                        package_list = self.packageService.remove_refs_in_package(package, item_id, processed_packages)
-
-                        processed_packages = processed_packages.union(set(package_list))
-                except Exception:
-                    logger.exception(
-                        "Failed to remove the broadcast item {} from package {}".format(
-                            item_id, package.get(config.ID_FIELD)
-                        )
-                    )
-
-            kill_service.kill_item(updates, item)
+            await self.remove_rewrite_refs(original)

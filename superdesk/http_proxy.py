@@ -1,7 +1,11 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, cast
 import requests
-from flask import Flask, request, current_app, Response as FlaskResponse, make_response
+
+from quart.typing import ResponseTypes
+
 from superdesk import __version__ as superdesk_version
+from superdesk.core import get_app_config, get_current_app
+from superdesk.flask import request, make_response, Flask
 from superdesk.utils import get_cors_headers
 
 
@@ -27,7 +31,7 @@ class HTTPProxy:
 
     Example:
     ::
-        from flask import Flask
+        from superdesk.flask import Flask
         from superdesk.http_proxy import HTTPProxy, register_http_proxy
 
         def init_app(app: Flask) -> None:
@@ -75,35 +79,39 @@ class HTTPProxy:
         self.use_cors = use_cors
         self.session = requests.Session()
 
-    def get_internal_url(self, app: Optional[Flask] = None) -> str:
+    def get_internal_url(self) -> str:
         """Returns the base URL route used when registering the proxy with Flask"""
 
-        url_prefix = ((app or current_app).config["URL_PREFIX"]).lstrip("/")
+        url_prefix = cast(str, get_app_config("URL_PREFIX")).lstrip("/")
         return f"/{url_prefix}/{self.internal_url}"
 
-    def process_request(self, path: str) -> FlaskResponse:
+    async def process_request(self, path: str) -> ResponseTypes:
         """The main function used for processing requests from the client"""
 
-        self.authenticate()
-        response = make_response() if request.method == "OPTIONS" else self.send_proxy_request()
+        await self.authenticate()
+        response = await (make_response() if request.method == "OPTIONS" else self.send_proxy_request())
         if self.use_cors:
             # Ignore following type check, as ``typing--Werkzeug=1.0.9`` is missing stub for ``update`` method
+            response.headers.set("Access-Control-Allow-Origin", "*")
+
             response.headers.update(get_cors_headers(",".join(self.http_methods)))  # type: ignore
         return response
 
-    def authenticate(self):
+    async def authenticate(self):
         """If auth is enabled, make sure the current session is authenticated"""
 
         # Use ``_blueprint`` for resource name for auth purposes (copied from the ``blueprint_auth`` decorator)
-        if self.auth and not current_app.auth.authorized([], "_blueprint", request.method):
+        current_app = get_current_app()
+
+        if self.auth and not await current_app.auth.authorized([], "_blueprint", request.method):
             # Calling ``auth.authenticate`` raises a ``SuperdeskApiError.unauthorizedError()`` exception
             current_app.auth.authenticate()
 
-    def send_proxy_request(self) -> FlaskResponse:
-        result = self.session.request(**self.get_proxy_request_kwargs())
+    async def send_proxy_request(self) -> ResponseTypes:
+        result = self.session.request(**(await self.get_proxy_request_kwargs()))
         return self.construct_response(result)
 
-    def get_proxy_request_kwargs(self) -> Dict[str, Any]:
+    async def get_proxy_request_kwargs(self) -> Dict[str, Any]:
         """Returns the kwargs used when executing the ``requests.request`` call to the external service"""
 
         proxied_path = request.full_path.replace(self.get_internal_url(), "")
@@ -123,13 +131,13 @@ class HTTPProxy:
             url=proxied_url,
             method=request.method,
             headers=headers,
-            data=request.get_data(),
+            data=await request.get_data(),
             allow_redirects=True,
             stream=True,
-            timeout=current_app.config["HTTP_PROXY_TIMEOUT"],
+            timeout=get_app_config("HTTP_PROXY_TIMEOUT"),
         )
 
-    def construct_response(self, result: requests.Response) -> FlaskResponse:
+    def construct_response(self, result: requests.Response) -> ResponseTypes:
         """Returns the Flask.Response instance based on the response from the external service"""
 
         # Exclude "Hop-by-hop" headers
@@ -146,7 +154,7 @@ class HTTPProxy:
         ]
         headers = [(k, v) for k, v in result.raw.headers.items() if k.lower() not in excluded_headers]
 
-        return current_app.response_class(
+        return get_current_app().response_class(
             result.iter_content(),
             result.status_code,
             headers,
@@ -157,7 +165,7 @@ class HTTPProxy:
 def register_http_proxy(app: Flask, proxy: HTTPProxy):
     """Register a HTTPProxy instance by adding URL rules to Flask"""
 
-    internal_url = proxy.get_internal_url(app)
+    internal_url = proxy.get_internal_url()
     app.add_url_rule(
         internal_url, proxy.endpoint_name, proxy.process_request, defaults={"path": ""}, methods=proxy.http_methods
     )

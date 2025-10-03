@@ -14,8 +14,8 @@ import logging
 from eve.auth import BasicAuth
 
 import superdesk
+from superdesk.resource_fields import LINKS
 
-from eve.utils import config
 from .services import Service
 
 from . import resource_locking
@@ -43,10 +43,10 @@ FieldTypes = Literal["string", "boolean", "integer", "dict", "list", "datetime"]
 
 def build_custom_hateoas(hateoas, doc, **values):
     values.update(doc)
-    links = doc.get(config.LINKS)
+    links = doc.get(LINKS)
     if not links:
         links = {}
-        doc[config.LINKS] = links
+        doc[LINKS] = links
 
     for link_name in hateoas.keys():
         link = hateoas[link_name]
@@ -186,22 +186,37 @@ class Resource:
         self.endpoint_schema = endpoint_schema
 
         on_fetched_resource = getattr(app, "on_fetched_resource_%s" % self.endpoint_name)
+        if hasattr(service, "on_fetched_async"):
+            on_fetched_resource -= service.on_fetched_async
+            on_fetched_resource += service.on_fetched_async
         on_fetched_resource -= service.on_fetched
         on_fetched_resource += service.on_fetched
 
         on_fetched_item = getattr(app, "on_fetched_item_%s" % self.endpoint_name)
+        if hasattr(service, "on_fetched_item_async"):
+            on_fetched_item -= service.on_fetched_item_async
+            on_fetched_item += service.on_fetched_item_async
         on_fetched_item -= service.on_fetched_item
         on_fetched_item += service.on_fetched_item
 
         on_insert_event = getattr(app, "on_insert_%s" % self.endpoint_name)
+        if hasattr(service, "on_create_async"):
+            on_insert_event -= service.on_create_async
+            on_insert_event += service.on_create_async
         on_insert_event -= service.on_create
         on_insert_event += service.on_create
 
         on_inserted_event = getattr(app, "on_inserted_%s" % self.endpoint_name)
+        if hasattr(service, "on_created_async"):
+            on_inserted_event -= service.on_created_async
+            on_inserted_event += service.on_created_async
         on_inserted_event -= service.on_created
         on_inserted_event += service.on_created
 
         on_update_event = getattr(app, "on_update_%s" % self.endpoint_name)
+        if hasattr(service, "on_update_async"):
+            on_update_event -= service.on_update_async
+            on_update_event += service.on_update_async
         on_update_event -= service.on_update
         on_update_event += service.on_update
 
@@ -209,22 +224,37 @@ class Resource:
             on_update_event += resource_locking.on_update
 
         on_updated_event = getattr(app, "on_updated_%s" % self.endpoint_name)
+        if hasattr(service, "on_updated_async"):
+            on_updated_event -= service.on_updated_async
+            on_updated_event += service.on_updated_async
         on_updated_event -= service.on_updated
         on_updated_event += service.on_updated
 
         on_replace_event = getattr(app, "on_replace_%s" % self.endpoint_name)
+        if hasattr(service, "on_replace_async"):
+            on_replace_event -= service.on_replace_async
+            on_replace_event += service.on_replace_async
         on_replace_event -= service.on_replace
         on_replace_event += service.on_replace
 
         on_replaced_event = getattr(app, "on_replaced_%s" % self.endpoint_name)
+        if hasattr(service, "on_replaced_async"):
+            on_replaced_event -= service.on_replaced_async
+            on_replaced_event += service.on_replaced_async
         on_replaced_event -= service.on_replaced
         on_replaced_event += service.on_replaced
 
         on_delete_event = getattr(app, "on_delete_item_%s" % self.endpoint_name)
+        if hasattr(service, "on_delete_async"):
+            on_delete_event -= service.on_delete_async
+            on_delete_event += service.on_delete_async
         on_delete_event -= service.on_delete
         on_delete_event += service.on_delete
 
         on_deleted_event = getattr(app, "on_deleted_item_%s" % self.endpoint_name)
+        if hasattr(service, "on_deleted_async"):
+            on_deleted_event -= service.on_deleted_async
+            on_deleted_event += service.on_deleted_async
         on_deleted_event -= service.on_deleted
         on_deleted_event += service.on_deleted
 
@@ -238,10 +268,18 @@ class Resource:
             )
 
         for request_method in ["GET", "POST", "PATCH", "PUT", "DELETE"]:
-            if hasattr(self, "pre_request_" + request_method.lower()):
-                hook_event_name = "on_pre_" + request_method + "_" + self.endpoint_name
+            request_name = request_method.lower()
+            if hasattr(self, f"pre_request_{request_name}_async"):
+                hook_event_name = f"on_pre_{request_method}_{self.endpoint_name}"
                 hook_event = getattr(app, hook_event_name)
-                hook_method = getattr(self, "pre_request_" + request_method.lower())
+                hook_method = getattr(self, f"pre_request_{request_name}_async")
+                hook_event -= hook_method
+                hook_event += hook_method
+
+            if hasattr(self, f"pre_request_{request_name}"):
+                hook_event_name = f"on_pre_{request_method}_{self.endpoint_name}"
+                hook_event = getattr(app, hook_event_name)
+                hook_method = getattr(self, f"pre_request_{request_name}")
                 hook_event -= hook_method
                 hook_event += hook_method
 
@@ -261,13 +299,13 @@ class Resource:
         }
         for method in [method for method in dir(service) if method.startswith("on_")]:
             for operation, eve_event in operations_events.items():
-                method_prefix = "on_%s_res_" % operation
+                method_prefix = f"on_{operation}_res_"
                 service_method = getattr(service, method)
                 if method.startswith(method_prefix) and callable(service_method):
-                    foreign_endpoint_name = method[len(method_prefix) :]
+                    foreign_endpoint_name = method[len(method_prefix) :].rsplit("_async", 1)[0]
                     if foreign_endpoint_name not in superdesk.resources:
                         raise RuntimeError('Invalid hook "%s" in service "%s"' % (method, type(service)))
-                    eve_hook = getattr(app, "on_%s_%s" % (eve_event, foreign_endpoint_name))
+                    eve_hook = getattr(app, f"on_{eve_event}_{foreign_endpoint_name}")
                     eve_hook -= service_method
                     eve_hook += service_method
 

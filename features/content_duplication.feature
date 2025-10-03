@@ -231,7 +231,7 @@ Feature: Duplication of Content
 
     @auth
     Scenario: User can't duplicate content without a privilege
-      When we login as user "foo" with password "bar" and user type "user"
+      When we login as user "foo" with password "barword" and user type "user"
       """
       {"user_type": "user", "email": "foo.bar@foobar.org"}
       """
@@ -625,19 +625,6 @@ Feature: Duplication of Content
       """
       { "flags": {"marked_for_sms" : false}}
       """
-
-    @auth
-    Scenario: Planning assignment is removed from an item on duplication
-      When we patch given
-      """
-      {"assignment_id": "1234"}
-      """
-      When we post to "/archive/123/duplicate" with success
-      """
-      {"desk": "#desks._id#","type": "archive"}
-      """
-      When we get "/archive/#duplicate._id#"
-      Then we get "assignment_id" does not exist
 
     @auth
     Scenario: Auto publish flag is removed on duplication

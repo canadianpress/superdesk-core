@@ -10,7 +10,7 @@
 
 import json
 
-from flask import current_app as app
+from superdesk.core import get_app_config
 from superdesk.publish import register_transmitter
 from superdesk.publish.publish_service import PublishService
 from superdesk.errors import PublishODBCError
@@ -36,15 +36,15 @@ class ODBCPublishService(PublishService):
 
     NAME = "ODBC"
 
-    def _transmit(self, queue_item, subscriber):
+    async def _transmit(self, queue_item, subscriber):
         """
         Transmit the given formatted item to the configured ODBC output.
 
         Configuration must have connection string and the name of a stored procedure.
         """
 
-        if not app.config["ODBC_PUBLISH"] or not pyodbc_available:
-            raise PublishODBCError()
+        if not get_app_config("ODBC_PUBLISH") or not pyodbc_available:
+            raise await PublishODBCError().send_notifications()
 
         config = queue_item.get("destination", {}).get("config", {})
 
@@ -56,7 +56,7 @@ class ODBCPublishService(PublishService):
                 conn.commit()
             return ret
         except Exception as ex:
-            raise PublishODBCError.odbcError(ex, config)
+            raise await PublishODBCError.odbcError(ex, config).send_notifications()
 
     def _CallStoredProc(self, conn, procName, paramDict):
         params = ""

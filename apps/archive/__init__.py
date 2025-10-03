@@ -17,17 +17,17 @@ from typing import Any
 import superdesk
 from superdesk.celery_app import celery
 
+from .common import ARCHIVE  # noqa  - fixes circular imports
+from .resource import ArchiveResource, ArchiveVersionsResource
 from .archive import (
     ArchiveInternalResource,
-    ArchiveResource,
     ArchiveService,
-    ArchiveVersionsResource,
     ArchiveVersionsService,
     AutoSaveResource,
     ArchiveSaveService,
     archive_internal_service,
 )
-from .commands import RemoveExpiredContent, LOCK_EXPIRY
+from .commands import RemoveExpiredContent, LOCK_EXPIRY, cli_archive_remove_expired  # noqa
 from .ingest import IngestResource, AppIngestService
 from .user_content import UserContentResource, UserContentService
 from .archive_lock import ArchiveLockResource, ArchiveUnlockResource, ArchiveLockService, ArchiveUnlockService
@@ -41,7 +41,7 @@ from apps.item_lock.models.item import ItemModel
 from apps.common.models.io.eve_proxy import EveProxy
 from .archive_rewrite import ArchiveRewriteResource, ArchiveRewriteService
 from .news import NewsResource, NewsService
-from flask_babel import _, lazy_gettext
+from quart_babel import lazy_gettext
 
 logger = logging.getLogger(__name__)
 
@@ -149,5 +149,5 @@ def init_app(app) -> None:
 
 
 @celery.task(soft_time_limit=LOCK_EXPIRY - 300)  # should finish before the lock is gone
-def content_expiry():
-    RemoveExpiredContent().run()
+async def content_expiry():
+    await RemoveExpiredContent().run()

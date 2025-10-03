@@ -21,18 +21,18 @@ Feature: Kill a content item in the (dusty) archive
     """
     [{
       "name":"Channel 1", "media_type":"media", "subscriber_type": "digital", "sequence_num_settings":{"min" : 1, "max" : 10}, "email": "test@test.com",
-      "products": ["#products._id#"], "_id": "s-d", "is_active": true,
+      "products": ["#products._id#"], "_id": "1234567890abcd1234567890", "is_active": true,
       "destinations":[{"name":"Test","format": "nitf", "delivery_type":"email","config":{"recipients":"test@test.com"}}]
     },
     {
       "name":"Channel 2", "media_type":"media", "subscriber_type": "wire", "sequence_num_settings":{"min" : 1, "max" : 10}, "email": "test@test.com",
-      "products": ["#products._id#"], "_id": "s-w", "is_active": true,
+      "products": ["#products._id#"], "_id": "1234567890abcd1234567891", "is_active": true,
       "destinations":[{"name":"Test","format": "nitf", "delivery_type":"email","config":{"recipients":"test@test.com"}}]
     }]
     """
     When we post to "content_templates"
     """
-    {"template_name": "kill", "template_type": "kill",
+    {"template_name": "kill", "template_type": "kill", "is_public": true
      "data": {"body_html": "<p>Story killed due to court case. Please remove the story from your archive.<\/p>",
               "type": "text", "abstract": "This article has been removed", "headline": "Kill\/Takedown notice ~~~ Kill\/Takedown notice",
               "urgency": 1, "priority": 1,  "anpa_take_key": "KILL\/TAKEDOWN"}
@@ -85,16 +85,6 @@ Feature: Kill a content item in the (dusty) archive
     And we get "/publish_queue"
     Then we get list with 2 items
     When run import legal publish queue
-    And we get "/legal_publish_queue"
-    Then we get list with 1 items
-    """
-    {"_items" : [
-        {"item_id": "123", "subscriber_id":"Channel api", "content_type": "text",
-        "item_version": 2, "publishing_action": "published"}
-     ]}
-    """
-    When we transmit items
-    And run import legal publish queue
     When we get "/legal_publish_queue"
     Then we get list with 2 items
     """
@@ -234,9 +224,9 @@ Feature: Kill a content item in the (dusty) archive
     """
     [
         {"item_id": "123", "subscriber_id":"Channel 2", "content_type": "text",
-        "item_version": 2, "publishing_action": "published", "_subscriber_id": "s-w"},
+        "item_version": 2, "publishing_action": "published", "_subscriber_id": "1234567890abcd1234567891"},
         {"item_id": "234", "subscriber_id":"Channel 1", "content_type": "text",
-        "item_version": 2, "publishing_action": "published", "_subscriber_id": "s-d"}
+        "item_version": 2, "publishing_action": "published", "_subscriber_id": "1234567890abcd1234567890"}
      ]
     """
     And "legal_archive_versions" with objectid
@@ -256,7 +246,7 @@ Feature: Kill a content item in the (dusty) archive
     When we get "/published"
     Then we get list with 2 items
     When we get "/publish_queue"
-    Then we get list with 2 items
+    Then we get list with 3 items
     When we get "/archive/123"
     Then we get OK response
     And we get text "Please kill story slugged slugline" in response field "body_html"
@@ -273,7 +263,7 @@ Feature: Kill a content item in the (dusty) archive
     When we get "/legal_archive/123?version=all"
     Then we get list with 3 items
     When we get "/legal_publish_queue"
-    Then we get list with 4 items
+    Then we get list with 5 items
     When we expire items
     """
     ["123", "234"]
@@ -685,56 +675,56 @@ Feature: Kill a content item in the (dusty) archive
     [
       {
           "subscriber_id" : "Channel 1",
-          "_subscriber_id" : "s-d",
+          "_subscriber_id" : "1234567890abcd1234567890",
           "content_type" : "composite",
           "publishing_action" : "published",
           "item_id" : "234",
           "item_version" : 3
       },{
           "subscriber_id" : "Channel 2",
-          "_subscriber_id" : "s-w",
+          "_subscriber_id" : "1234567890abcd1234567891",
           "content_type" : "text",
           "publishing_action" : "published",
           "item_id" : "123",
           "item_version" : 2
       },{
           "subscriber_id" : "Channel 1",
-          "_subscriber_id" : "s-d",
+          "_subscriber_id" : "1234567890abcd1234567890",
           "content_type" : "composite",
           "publishing_action" : "corrected",
           "item_id" : "234",
           "item_version" : 4
       },{
           "subscriber_id" : "Channel 2",
-          "_subscriber_id" : "s-w",
+          "_subscriber_id" : "1234567890abcd1234567891",
           "content_type" : "text",
           "publishing_action" : "corrected",
           "item_id" : "123",
           "item_version" : 3
       },{
           "subscriber_id" : "Channel 1",
-          "_subscriber_id" : "s-d",
+          "_subscriber_id" : "1234567890abcd1234567890",
           "content_type" : "composite",
           "publishing_action" : "published",
           "item_id" : "234",
           "item_version" : 5
       },{
           "subscriber_id" : "Channel 2",
-          "_subscriber_id" : "s-w",
+          "_subscriber_id" : "1234567890abcd1234567891",
           "content_type" : "text",
           "publishing_action" : "published",
           "item_id" : "456",
           "item_version" : 3
       },{
           "subscriber_id" : "Channel 1",
-          "_subscriber_id" : "s-d",
+          "_subscriber_id" : "1234567890abcd1234567890",
           "content_type" : "composite",
           "publishing_action" : "published",
           "item_id" : "234",
           "item_version" : 6
       },{
           "subscriber_id" : "Channel 2",
-          "_subscriber_id" : "s-w",
+          "_subscriber_id" : "1234567890abcd1234567891",
           "content_type" : "text",
           "publishing_action" : "published",
           "item_id" : "789",
@@ -832,7 +822,7 @@ Feature: Kill a content item in the (dusty) archive
     When we get "/published"
     Then we get list with 4 items
     When we get "/publish_queue"
-    Then we get list with 4 items
+    Then we get list with 7 items
     When we get "/archived"
     Then we get list with 0 items
     When we transmit items
@@ -1154,10 +1144,6 @@ Feature: Kill a content item in the (dusty) archive
     Then we get list with 2 items
     When run import legal publish queue
     And we get "/legal_publish_queue"
-    Then we get list with 0 items
-    When we transmit items
-    And run import legal publish queue
-    When we get "/legal_publish_queue"
     Then we get list with 2 items
     """
     {"_items" : [
@@ -1281,16 +1267,6 @@ Feature: Kill a content item in the (dusty) archive
     Then we get list with 2 items
     When run import legal publish queue
     And we get "/legal_publish_queue"
-    Then we get list with 1 items
-    """
-    {"_items" : [
-        {"item_id": "123", "subscriber_id":"Channel api", "content_type": "text",
-        "item_version": 2, "publishing_action": "published"}
-     ]}
-    """
-    When we transmit items
-    And run import legal publish queue
-    When we get "/legal_publish_queue"
     Then we get list with 2 items
     """
     {"_items" : [

@@ -8,14 +8,15 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
-from flask import g, request
-from flask_babel import _
-from flask_oidc_ex import OpenIDConnect
+from quart_babel import gettext as _
 
+# from flask_oidc_ex import OpenIDConnect
+
+from superdesk.resource_fields import ID_FIELD
+from superdesk.flask import g, request
 import superdesk
 from apps.auth.errors import CredentialsAuthError
 from apps.auth.service import AuthService
-from eve.utils import config
 from superdesk import get_resource_service
 from superdesk.resource import Resource
 from superdesk.utils import ignorecase_query
@@ -36,9 +37,10 @@ superdesk.intrinsic_privilege("auth_oidc", method=["DELETE"])
 class OIDCAuthService(AuthService):
     def __init__(self, datasource=None, backend=None, app=None):
         super().__init__(datasource=datasource, backend=backend)
-        self.oidc = OpenIDConnect(app)
+        # TODO: Fix this after Flask3 upgrade
+        # self.oidc = OpenIDConnect(app)
 
-    def authenticate(self, credentials):
+    async def authenticate(self, credentials):
         auth_header = request.headers.get("Authorization", "").split(" ", 1)
         if auth_header[0] != "Bearer" and len(auth_header) != 2:
             raise CredentialsAuthError(credentials)
@@ -49,7 +51,7 @@ class OIDCAuthService(AuthService):
 
         users_service = get_resource_service("users")
         username = g.oidc_token_info["username"]
-        user = users_service.find_one(req=None, username=username) or {}
+        user = await users_service.find_one_async(req=None, username=username) or {}
 
         sync_data = {
             "username": username,
@@ -71,7 +73,7 @@ class OIDCAuthService(AuthService):
             client_id = g.oidc_token_info.get("client_id", "")
             keycloak_roles = g.oidc_token_info.get("resource_access", {}).get(client_id, {}).get("roles", [])
             for role_name in keycloak_roles:
-                role = get_resource_service("roles").find_one(req=None, name=ignorecase_query(role_name))
+                role = await get_resource_service("roles").find_one_async(req=None, name=ignorecase_query(role_name))
                 if role:
                     user_role = role.get("_id")
                     break
@@ -83,9 +85,9 @@ class OIDCAuthService(AuthService):
                     "needs_activation": False,
                 }
             )
-            users_service.post([sync_data])
+            await users_service.post_async([sync_data])
         else:
-            users_service.patch(user[config.ID_FIELD], sync_data)
+            await users_service.patch_async(user[ID_FIELD], sync_data)
 
         user.update(sync_data)
         return user

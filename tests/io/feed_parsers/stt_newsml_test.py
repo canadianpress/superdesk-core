@@ -16,14 +16,15 @@ import os
 
 
 class BaseSTTNewsMLTestCase(TestCase):
-    def setUp(self):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
         dirname = os.path.dirname(os.path.realpath(__file__))
         fixture = os.path.normpath(os.path.join(dirname, "../fixtures", self.filename))
         provider = {"name": "Test"}
         with open(fixture, "rb") as f:
             parser = STTNewsMLFeedParser()
             self.xml_root = etree.parse(f).getroot()
-            self.item = parser.parse(self.xml_root, provider)
+            self.item = await parser.parse(self.xml_root, provider)
 
 
 class STTTestCase(BaseSTTNewsMLTestCase):

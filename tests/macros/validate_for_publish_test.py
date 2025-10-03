@@ -20,10 +20,9 @@ class ValidateForPublishTests(TestCase):
         "schema": {"headline": {"required": True, "maxlength": 5, "empty": False, "nullable": False, "type": "string"}},
     }
 
-    def test_validator(self):
+    async def test_validator(self):
         self.app.data.insert("archive", [{"_id": 1, "type": "text", "headline": "123456"}])
         self.app.data.insert("validators", [self.validator])
-        with self.app.app_context():
-            with self.assertRaises(ValidationError):
-                item = {"_id": 1}
-                validate_for_publish(item)
+        with self.assertRaises(ValidationError):
+            item = {"_id": 1}
+            await validate_for_publish(item)

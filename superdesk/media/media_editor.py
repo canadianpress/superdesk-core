@@ -9,15 +9,16 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 
-from superdesk.resource import Resource, not_analyzed
-from superdesk.services import BaseService
+from superdesk.eve_async.service import AsyncBaseService
+from superdesk.resource_fields import ID_FIELD
+from superdesk.resource import Resource
 from superdesk.media.renditions import generate_renditions, get_renditions_spec
 from superdesk import get_resource_service
 from superdesk import errors
-from flask import current_app
+from superdesk.core import get_current_app
+
 from PIL import Image, ImageEnhance
 from io import BytesIO
-from eve.utils import config
 import os.path
 import uuid
 import logging
@@ -47,7 +48,7 @@ class MediaEditorResource(Resource):
     privileges = {"POST": "archive"}
 
 
-class MediaEditorService(BaseService):
+class MediaEditorService(AsyncBaseService):
     """Service givin metadata on backend itself"""
 
     def transform(self, im, operation):
@@ -87,8 +88,9 @@ class MediaEditorService(BaseService):
 
         return im
 
-    def create(self, docs):
+    async def create_async(self, docs: list[dict], **kwargs) -> list:
         """Apply transformation requested in 'edit'"""
+        app = get_current_app()
         ids = []
         archive = get_resource_service("archive")
         for doc in docs:
@@ -100,16 +102,19 @@ class MediaEditorService(BaseService):
                 except KeyError:
                     raise errors.SuperdeskApiError.badRequestError("either item or item_id must be specified")
             else:
-                item_id = item[config.ID_FIELD]
+                item_id = item[ID_FIELD]
 
             if item is None and item_id:
-                item = next(archive.find({"_id": item_id}))
+                try:
+                    item = await (await archive.find_async({"_id": item_id})).next()
+                except StopAsyncIteration:
+                    item = None
             edit = doc.pop("edit")
 
             # now we retrieve and load current original media
             rendition = item["renditions"]["original"]
             media_id = rendition["media"]
-            media = current_app.media.get(media_id)
+            media = app.media.get(media_id)
             out = im = Image.open(media)
 
             # we apply all requested operations on original media
@@ -133,12 +138,12 @@ class MediaEditorService(BaseService):
             filename = str(uuid.uuid4()) + ext
 
             # and save transformed media in database
-            media_id = current_app.media.put(buf, filename=filename, content_type=content_type)
+            media_id = await app.media.put_async(buf, filename=filename, content_type=content_type)
 
             # now we recreate other renditions based on transformed original media
             buf.seek(0)
             renditions = generate_renditions(
-                buf, media_id, [], "image", content_type, get_renditions_spec(), current_app.media.url_for_media
+                buf, media_id, [], "image", content_type, get_renditions_spec(), app.media.url_for_media
             )
 
             ids.append(item_id)

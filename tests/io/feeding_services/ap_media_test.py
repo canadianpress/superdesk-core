@@ -30,8 +30,9 @@ PROVIDER = {
 
 
 class APTestCase(TestCase):
-    def setUp(self):
-        super().setUp()
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # super().setUp()
         self.setupMock(self)
 
     #        with self.app.app_context():
@@ -65,13 +66,13 @@ class APTestCase(TestCase):
         return {"status_code": 200, "content": feed_item}
 
     @mock.patch.object(APMediaFeedingService, "get_feed_parser")
-    def test_feeding(self, get_feed_parser):
+    async def test_feeding(self, get_feed_parser):
         get_feed_parser.return_value = APMediaFeedParser()
         provider = PROVIDER.copy()
         provider["config"]["api_url"] = "https://a.b.c/media/v/content/feed"
         service = APMediaFeedingService()
         service.provider = provider
-        items = service._update(provider, {})[0]
+        items = (await service._update(provider, {}))[0]
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].get("headline"), "headline")
 
@@ -100,14 +101,14 @@ class APTestCase(TestCase):
         return {"status_code": 200, "content": feed_item}
 
     @mock.patch.object(APMediaFeedingService, "get_feed_parser")
-    def test_text_feeding(self, get_feed_parser):
+    async def test_text_feeding(self, get_feed_parser):
         get_feed_parser.return_value = APMediaFeedParser()
         provider = PROVIDER.copy()
         provider["config"]["api_url"] = "https://d.e.f/media/v/content/feed"
         provider["config"]["next_link"] = ""
         service = APMediaFeedingService()
         service.provider = provider
-        items = service._update(provider, {})[0]
+        items = (await service._update(provider, {}))[0]
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].get("headline"), "BC-BBN--Top Ten")
         self.assertEqual(items[0].get("slugline"), "BBN--Top Ten")

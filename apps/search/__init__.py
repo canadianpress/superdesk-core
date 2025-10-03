@@ -11,19 +11,24 @@
 import superdesk
 
 from copy import deepcopy
-from flask import current_app as app, json, g
-from eve_elastic.elastic import set_filters
+from eve_elastic.elastic import set_filters, fix_query
 
+from superdesk.core import json, get_current_app, get_app_config, get_current_async_app
+from superdesk.resource_fields import ITEMS
+from superdesk.types import ArchiveResourceModel
+from superdesk.eve_async import AsyncBaseService, ElasticAsyncEveCursor
 from superdesk import get_resource_service
 from superdesk.metadata.item import CONTENT_STATE, ITEM_STATE, get_schema
 from superdesk.metadata.utils import aggregations as common_aggregations, item_url, _set_highlight_query
-from apps.archive.archive import SOURCE as ARCHIVE, ArchiveResource, private_content_filter
+from apps.archive.resource import ArchiveResource
+from apps.archive.archive import SOURCE as ARCHIVE, private_content_filter
 from superdesk.resource import build_custom_hateoas
 from apps.publish.published_item import published_item_fields
 from superdesk import es_utils
+from superdesk.utils import ListCursor
 
 
-class SearchService(superdesk.Service):
+class SearchService(AsyncBaseService):
     """Federated search service.
 
     It can search against different collections like Ingest, Production, Archived etc.. at the same time.
@@ -34,7 +39,11 @@ class SearchService(superdesk.Service):
 
     @property
     def elastic(self):
-        return app.data.elastic
+        return get_current_app().data.elastic
+
+    @property
+    def elastic_async(self):
+        return get_current_app().data.elastic_async
 
     def __init__(self, datasource, backend):
         super().__init__(datasource=datasource, backend=backend)
@@ -111,6 +120,7 @@ class SearchService(superdesk.Service):
         except KeyError:
             pass
 
+        app = get_current_app()
         if app.data.elastic.should_aggregate(req):
             source["aggs"] = self.aggregations
 
@@ -120,11 +130,12 @@ class SearchService(superdesk.Service):
         return source
 
     def _enhance_query_string(self, query_string):
-        query_string.setdefault("analyze_wildcard", app.config["ELASTIC_QUERY_STRING_ANALYZE_WILDCARD"])
-        query_string.setdefault("type", app.config["ELASTIC_QUERY_STRING_TYPE"])
+        query_string.setdefault("analyze_wildcard", get_app_config("ELASTIC_QUERY_STRING_ANALYZE_WILDCARD"))
+        query_string.setdefault("type", get_app_config("ELASTIC_QUERY_STRING_TYPE"))
 
     def _get_projected_fields(self, req):
         """Get elastic projected fields."""
+        app = get_current_app()
         if app.data.elastic.should_project(req):
             return app.data.elastic.get_projected_fields(req)
 
@@ -149,13 +160,39 @@ class SearchService(superdesk.Service):
         """
         Returns the list of the current users invisible stages
         """
-        user = g.get("user", {})
+        user = get_current_app().get_current_user_dict() or {}
         if "invisible_stages" in user:
             stages = user.get("invisible_stages")
         else:
+            # TODO-ASYNC[users]: Upgrade to async when updating this module
             stages = get_resource_service("users").get_invisible_stages_ids(user.get("_id"))
 
         return stages
+
+    async def get_stages_to_exclude_async(self):
+        """
+        Returns the list of the current users invisible stages
+        """
+        user = get_current_app().get_current_user_dict() or {}
+        if "invisible_stages" in user:
+            stages = user.get("invisible_stages")
+        else:
+            stages = await get_resource_service("users").get_invisible_stages_ids_async(user.get("_id"))
+
+        return stages
+
+    def _get_es_index(self, resource_name: str) -> str:
+        return get_current_app().data.elastic._resource_index(resource_name)
+
+    def _get_projection(self, req) -> list[str]:
+        fields = self._get_projected_fields(req)
+        projection = (fields or "").split(",")
+
+        if projection and "type" not in projection:
+            # Make sure `type` is always included in the projection
+            projection.append("type")
+
+        return projection
 
     def get(self, req, lookup):
         """
@@ -169,8 +206,8 @@ class SearchService(superdesk.Service):
         filters = self._get_filters(types, excluded_stages)
 
         # if the system has a setting value for the maximum search depth then apply the filter
-        if not app.settings["MAX_SEARCH_DEPTH"] == -1:
-            query["terminate_after"] = app.settings["MAX_SEARCH_DEPTH"]
+        if not get_app_config("MAX_SEARCH_DEPTH") == -1:
+            query["terminate_after"] = get_app_config("MAX_SEARCH_DEPTH")
 
         if filters:
             set_filters(query, filters)
@@ -182,11 +219,44 @@ class SearchService(superdesk.Service):
         docs = self.elastic.search(query, types, params)
 
         for resource in types:
-            response = {app.config["ITEMS"]: [doc for doc in docs if doc["_type"] == resource]}
+            response = {ITEMS: [doc for doc in docs if doc["_type"] == resource]}
+            app = get_current_app().as_any()
             getattr(app, "on_fetched_resource")(resource, response)
             getattr(app, "on_fetched_resource_%s" % resource)(response)
 
         return docs
+
+    async def get_async(self, req, lookup) -> ElasticAsyncEveCursor:
+        """
+        Runs elastic search on multiple doc types.
+        """
+        query = self._get_query(req)
+        fields = self._get_projected_fields(req)
+        types = self._get_types(req)
+        excluded_stages = await self.get_stages_to_exclude_async()
+        filters = self._get_filters(types, excluded_stages)
+
+        # if the system has a setting value for the maximum search depth then apply the filter
+        if not get_app_config("MAX_SEARCH_DEPTH") == -1:
+            query["terminate_after"] = get_app_config("MAX_SEARCH_DEPTH")
+
+        if filters:
+            set_filters(query, filters)
+
+        params = {}
+        if fields:
+            params["_source"] = fields
+
+        cursor = await self.elastic_async.search(query, types, params)
+
+        app = get_current_app().as_any()
+        for resource in types:
+            response = {ITEMS: [doc async for doc in cursor if doc["_type"] == resource]}
+            await getattr(app, "on_fetched_resource").call_async(resource, response)
+            await getattr(app, "on_fetched_resource_%s_async" % resource).call_async(response)
+            await getattr(app, "on_fetched_resource_%s" % resource).call_async(response)
+
+        return cursor
 
     def _get_docs(self, hits):
         """Parse hits from elastic and return only docs.
@@ -197,17 +267,21 @@ class SearchService(superdesk.Service):
         """
         return self.elastic._parse_hits(hits, "ingest")  # any resource with item schema will do
 
-    def find_one(self, req, **lookup):
+    async def find_one_async(self, req, **lookup):
         """Find item by id in all collections."""
         _id = lookup["_id"]
         for resource in self._get_types(req):
             id_field = "item_id" if resource == "published" else "_id"
             resource_lookup = {id_field: _id}
-            item = get_resource_service(resource).find_one(req=req, **resource_lookup)
+            service = get_resource_service(resource)
+            if hasattr(service, "find_one_async"):
+                item = await service.find_one_async(req=req, **resource_lookup)
+            else:
+                item = service.find_one(req=req, **resource_lookup)
             if item:
                 return item
 
-    def on_fetched(self, doc):
+    async def on_fetched_async(self, doc):
         """
         Overriding to add HATEOS for each individual item in the response.
 
@@ -215,7 +289,7 @@ class SearchService(superdesk.Service):
         :type doc: dict
         """
 
-        docs = doc[app.config["ITEMS"]]
+        docs = doc[ITEMS]
         for item in docs:
             build_custom_hateoas({"self": {"title": item["_type"], "href": "/{}/{{_id}}".format(item["_type"])}}, item)
 
@@ -243,4 +317,4 @@ def init_app(app) -> None:
     SearchResource("search", app=app, service=search_service)
 
     # Set the start of week config for use in both server and client
-    app.client_config["start_of_week"] = app.config.get("START_OF_WEEK") or 0
+    app.client_config["start_of_week"] = get_app_config("START_OF_WEEK") or 0

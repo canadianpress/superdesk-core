@@ -21,8 +21,8 @@ The authentication flow with js client is:
 import logging
 import superdesk
 
-from flask import render_template, current_app as app
-
+from superdesk.core import get_app_config
+from superdesk.flask import render_template
 from apps.auth.auth import AuthResource
 from apps.auth.service import AuthService
 from superdesk.validation import ValidationError
@@ -41,13 +41,15 @@ class OAuthResource(AuthResource):
 
 
 class OAuthService(AuthService):
-    def authenticate(self, document):
+    async def authenticate(self, document):
         if not document.get("email"):
             return
-        return superdesk.get_resource_service("auth_users").find_one(req=None, email=document["email"].lower())
+        return await superdesk.get_resource_service("auth_users").find_one_async(
+            req=None, email=document["email"].lower()
+        )
 
 
-def auth_user(email, userdata=None):
+async def auth_user(email, userdata=None):
     """Authenticate user via email.
 
     This will create new session for user and render template with session data
@@ -58,25 +60,27 @@ def auth_user(email, userdata=None):
     # we don't get email from service
     if userdata and userdata.get("email"):
         email = userdata["email"]
+    elif userdata:
+        userdata.setdefault("email", email)
     data = [{"email": email}]
     if not email:
-        return render_template(AUTHORIZED_TEMPLATE, data={"error": 404})
+        return await render_template(AUTHORIZED_TEMPLATE, data={"error": 404})
     try:
-        superdesk.get_resource_service(RESOURCE).post(data)
+        await superdesk.get_resource_service(RESOURCE).post_async(data)
         data[0]["_id"] = str(data[0]["_id"])
         data[0]["user"] = str(data[0]["user"])
         if userdata:
-            superdesk.get_resource_service("users").update_external_user(data[0]["user"], userdata)
-        return render_template(AUTHORIZED_TEMPLATE, data=data[0])
+            await superdesk.get_resource_service("users").update_external_user_async(data[0]["user"], userdata)
+        return await render_template(AUTHORIZED_TEMPLATE, data=data[0])
     except ValueError:
-        if not app.config["USER_EXTERNAL_CREATE"] or not userdata:
-            return render_template(AUTHORIZED_TEMPLATE, data={"error": 404})
+        if not get_app_config("USER_EXTERNAL_CREATE") or not userdata:
+            return await render_template(AUTHORIZED_TEMPLATE, data={"error": 404})
 
     # create new user using userdata
     # and re-run auth
     try:
-        user = superdesk.get_resource_service("users").create_external_user(userdata)
-        return auth_user(user["email"])
+        user = await superdesk.get_resource_service("users").create_external_user_async(userdata)
+        return await auth_user(user["email"])
     except ValidationError as err:  # can't create user, so let it fail on next iteration
         logger.error(
             "can not create user automaticaly, userdata is not valid",
@@ -86,7 +90,7 @@ def auth_user(email, userdata=None):
             },
         )
 
-    return auth_user(None)
+    return await auth_user(None)
 
 
 def init_app(app) -> None:

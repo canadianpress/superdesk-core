@@ -1,6 +1,9 @@
 import logging
 import re
-from superdesk.services import BaseService
+from inspect import isawaitable
+
+from superdesk.core import get_current_app, json
+from superdesk.eve_async import AsyncBaseService
 from superdesk import get_resource_service
 from superdesk.errors import FormatterError, SuperdeskApiError
 from superdesk.publish.formatters import get_all_formatters
@@ -8,14 +11,13 @@ from superdesk.utils import get_random_string
 from superdesk.validation import ValidationError
 from io import BytesIO
 from zipfile import ZipFile
-from flask import current_app as app, json
-from flask_babel import _
+from quart_babel import gettext as _
 
 logger = logging.getLogger(__name__)
 
 
-class ExportService(BaseService):
-    def create(self, docs, **kwargs):
+class ExportService(AsyncBaseService):
+    async def create_async(self, docs, **kwargs):
         doc = docs[0]
         formatter = self._validate_and_get_formatter(doc)
 
@@ -26,17 +28,19 @@ class ExportService(BaseService):
         unsuccessful_exports = 0
 
         for item_id in doc.get("item_ids"):
-            item = archive_service.find_one(req=None, _id=item_id)
+            item = await archive_service.find_one_async(req=None, _id=item_id)
             if item:
                 if validate:
                     try:
-                        self._validate_for_publish(item)
+                        await self._validate_for_publish(item)
                     except ValidationError:
                         unsuccessful_exports += 1
                         continue
 
                 try:
                     contents = formatter.export(item)
+                    if isawaitable(contents):
+                        contents = await contents
                 except FormatterError as e:
                     logger.exception(e)
                     unsuccessful_exports += 1
@@ -67,7 +71,8 @@ class ExportService(BaseService):
                 for item_id, (filename, contents) in items.items():
                     zip.writestr(filename, contents.encode("UTF-8"))
 
-            zip_id = app.media.put(
+            app = get_current_app()
+            zip_id = await app.media.put_async(
                 in_memory_zip.getvalue(),
                 filename="export_{}.zip".format(get_random_string()),
                 content_type="application/zip",
@@ -77,10 +82,10 @@ class ExportService(BaseService):
 
         return [len(docs)]
 
-    def _validate_for_publish(self, doc):
+    async def _validate_for_publish(self, doc):
         """Validates the given story for publish action"""
         validate_item = {"act": "publish", "type": doc["type"], "validate": doc}
-        validation_errors = get_resource_service("validate").validate(validate_item)
+        validation_errors = await get_resource_service("validate").validate(validate_item)
         if validation_errors:
             raise ValidationError(validation_errors)
 

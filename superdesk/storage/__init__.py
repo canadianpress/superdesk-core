@@ -10,13 +10,14 @@
 
 """Superdesk storage module."""
 
-from flask import current_app as app
 from typing import Optional
 import abc
 
 from eve.io.media import MediaStorage
 from eve.io.mongo.media import GridFSMediaStorage, GridFS
 
+from superdesk.core import get_current_app
+from .utils import get_mimetype
 from .mimetype_mixin import MimetypeMixin
 
 
@@ -38,17 +39,45 @@ class SuperdeskMediaStorage(MediaStorage, MimetypeMixin):
         raise NotImplementedError
 
     @abc.abstractmethod
+    async def get_by_filename_async(self, filename, begin: int = 0, end: int | None = None):
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def remove_unreferenced_files(self, existing_files, resource=None):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def remove_unreferenced_files_async(self, existing_files, resource=None):
         raise NotImplementedError
 
     @abc.abstractmethod
     def fetch_rendition(self, rendition, resource=None):
         raise NotImplementedError
 
+    @abc.abstractmethod
+    async def fetch_rendition_async(self, rendition, resource=None):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def get_async(self, id_or_filename, resource=None, begin: int = 0, end: int | None = None):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def put_async(self, content, filename=None, content_type=None, resource=None):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def delete_async(self, id_or_filename, resource=None):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def exists_async(self, id_or_filename, resource=None):
+        raise NotImplementedError
+
 
 class SimpleMediaStorage(GridFSMediaStorage):
     def fs(self, resource):
-        driver = app.data.mongo
+        driver = get_current_app().data.mongo
 
         px = driver.current_mongo_prefix(resource)
         if px not in self._fs:
@@ -64,6 +93,6 @@ from .proxy import ProxyMediaStorage  # noqa
 from .desk_media_storage import SuperdeskGridFSMediaStorage  # noqa
 from .amazon_media_storage import AmazonMediaStorage  # noqa
 
-from .migrate import MigrateMediaCommand  # noqa
+from .migrate import cli_media_migrate  # noqa
 
 import superdesk.storage.fix_links  # noqa

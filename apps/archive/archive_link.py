@@ -7,10 +7,12 @@
 # For the full copyright and license information, please see the
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
-from eve.utils import config
-from flask import request, current_app as app
 
-from superdesk import get_resource_service, Service
+from superdesk.core import get_current_app
+from superdesk.resource_fields import ID_FIELD
+from superdesk.flask import request
+from superdesk import get_resource_service
+from superdesk.eve_async import AsyncBaseService
 from superdesk.metadata.item import GUID_TAG
 from superdesk.resource import Resource
 from apps.archive import ArchiveSpikeService
@@ -21,7 +23,7 @@ from apps.archive.archive import SOURCE as ARCHIVE
 from superdesk.errors import SuperdeskApiError
 from superdesk.notification import push_notification
 import logging
-from flask_babel import _
+from quart_babel import gettext as _
 
 logger = logging.getLogger(__name__)
 
@@ -41,16 +43,16 @@ class ArchiveLinkResource(Resource):
     item_methods = []
 
 
-class ArchiveLinkService(Service):
-    def delete(self, lookup):
+class ArchiveLinkService(AsyncBaseService):
+    async def delete_async(self, lookup):
         target_id = request.view_args["target_id"]
         archive_service = get_resource_service(ARCHIVE)
-        target = archive_service.find_one(req=None, _id=target_id)
+        target = archive_service.find_one_async(req=None, _id=target_id)
         updates = {}
 
         if target.get("rewrite_of"):
             # remove the rewrite info
-            ArchiveSpikeService().update_rewrite(target)
+            await ArchiveSpikeService().update_rewrite(target)
 
         if not target.get("rewrite_of"):
             # there is nothing to do
@@ -70,7 +72,8 @@ class ArchiveLinkService(Service):
 
         updates["event_id"] = generate_guid(type=GUID_TAG)
 
-        archive_service.system_update(target_id, updates, target)
+        await archive_service.system_update_async(target_id, updates, target)
         user = get_user(required=True)
-        push_notification("item:unlink", item=target_id, user=str(user.get(config.ID_FIELD)))
-        app.on_archive_item_updated(updates, target, ITEM_UNLINK)
+        push_notification("item:unlink", item=target_id, user=str(user.get(ID_FIELD)))
+        app = get_current_app().as_any()
+        await app.on_archive_item_updated.call_async(updates, target, ITEM_UNLINK)

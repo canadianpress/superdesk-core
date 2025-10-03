@@ -69,7 +69,7 @@ class NINJSFeedParser(FeedParser):
             pass
         return False
 
-    def parse(self, file_path, provider=None):
+    async def parse(self, file_path, provider=None):
         self.items = []
         with open(file_path, "r") as f:
             ninjs = json.load(f)
@@ -186,6 +186,7 @@ class NINJSFeedParser(FeedParser):
 
     def _format_qcodes(self, items: List[Dict[str, Any]], cv_name: Optional[str] = None) -> List[Dict[str, Any]]:
         subjects = []
+        # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
         cv = get_resource_service("vocabularies").find_one(req=None, _id=cv_name) or {}
         cv_items = {item["qcode"]: item for item in cv.get("items") or []}
 

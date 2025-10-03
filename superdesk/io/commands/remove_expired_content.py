@@ -8,18 +8,24 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
+import click
+
 import superdesk
-from flask import current_app as app
+from superdesk.core import get_current_app
+from superdesk.commands import cli
 from superdesk.logging import logger
 from superdesk.utc import utcnow
 from superdesk.notification import push_notification
-from apps.content import push_expired_notification
 from superdesk.errors import ProviderError
 from superdesk.lock import lock, unlock
 from superdesk.io import get_feeding_service
 
+from apps.content import push_expired_notification
 
-class RemoveExpiredContent(superdesk.Command):
+
+@cli.command("ingest:clean_expired")
+@click.option("--provider", "-p", "provider_name", required=False)
+async def cli_ingest_clean_expired(provider_name):
     """Remove stale data from ingest based on the provider settings.
 
     Example:
@@ -30,16 +36,20 @@ class RemoveExpiredContent(superdesk.Command):
 
     """
 
-    option_list = (superdesk.Option("--provider", "-p", dest="provider_name"),)
+    await RemoveExpiredContent().run(provider_name)
 
-    def run(self, provider_name=None):
-        providers = list(superdesk.get_resource_service("ingest_providers").get(req=None, lookup={}))
-        self.remove_expired({"exclude": [str(p.get("_id")) for p in providers]})
+
+class RemoveExpiredContent:
+    async def run(self, provider_name=None):
+        providers = await (
+            await superdesk.get_resource_service("ingest_providers").get_async(req=None, lookup={})
+        ).to_list()
+        await self.remove_expired({"exclude": [str(p.get("_id")) for p in providers]})
         for provider in providers:
             if not provider_name or provider_name == provider.get("name"):
-                self.remove_expired(provider)
+                await self.remove_expired(provider)
 
-    def remove_expired(self, provider):
+    async def remove_expired(self, provider):
         lock_name = "ingest:gc"
 
         if not lock(lock_name, expire=300):
@@ -50,12 +60,9 @@ class RemoveExpiredContent(superdesk.Command):
             push_notification("ingest:cleaned")
         except Exception as err:
             logger.exception(err)
-            raise ProviderError.expiredContentError(err, provider)
+            raise await ProviderError.expiredContentError(err, provider).send_notifications()
         finally:
             unlock(lock_name)
-
-
-superdesk.command("ingest:clean_expired", RemoveExpiredContent())
 
 
 def remove_expired_data(provider):
@@ -86,6 +93,7 @@ def remove_expired_data(provider):
         ingest_service.delete({"_id": {"$in": ids}})
         push_expired_notification(ids)
 
+    app = get_current_app()
     for file_id in file_ids:
         logger.info("Deleting file: %s" % file_id)
         app.media.delete(file_id)

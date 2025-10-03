@@ -10,7 +10,7 @@
 
 import json
 
-from flask import current_app as app
+from superdesk.core import get_app_config, get_current_app
 from superdesk.emails import send_email
 from superdesk.publish import register_transmitter
 from superdesk.publish.publish_service import PublishService
@@ -36,7 +36,7 @@ class EmailPublishService(PublishService):
 
     NAME = "Email"
 
-    def _transmit(self, queue_item, subscriber):
+    async def _transmit(self, queue_item, subscriber):
         config = queue_item.get("destination", {}).get("config", {})
 
         try:
@@ -48,11 +48,13 @@ class EmailPublishService(PublishService):
             except Exception:
                 item = {}
 
-            admins = app.config["ADMINS"]
+            admins = get_app_config("ADMINS")
             recipients = [r.strip() for r in config.get("recipients", "").split(";") if r.strip()]
             bcc = [r.strip() for r in config.get("recipients_bcc", "").split(";") if r.strip()]
             if not recipients and not bcc:
-                raise PublishEmailError.recipientNotFoundError(LookupError("recipient and bcc fields are empty!"))
+                raise await PublishEmailError.recipientNotFoundError(
+                    LookupError("recipient and bcc fields are empty!")
+                ).send_notifications()
 
             subject = item.get("message_subject", "Story: {}".format(queue_item["item_id"]))
             text_body = item.get("message_text", queue_item["formatted_item"])
@@ -67,7 +69,7 @@ class EmailPublishService(PublishService):
                 rendition = config.get("media_rendition", "")
                 media_item = item.get("renditions", {}).get(rendition)
                 if media_item and rendition:
-                    media = app.media.get(media_item["media"], resource="upload")
+                    media = get_current_app().media.get(media_item["media"], resource="upload")
                     im = Image.open(media)
                     if config.get("watermark", False):
                         im = get_watermark(im)
@@ -85,7 +87,7 @@ class EmailPublishService(PublishService):
                     )
 
             # sending email synchronously
-            send_email(
+            await send_email(
                 subject=subject,
                 sender=admins[0],
                 recipients=recipients,
@@ -96,7 +98,7 @@ class EmailPublishService(PublishService):
             )
 
         except Exception as ex:
-            raise PublishEmailError.emailError(ex, queue_item.get("destination"))
+            raise await PublishEmailError.emailError(ex, queue_item.get("destination")).send_notifications()
 
 
 register_transmitter("email", EmailPublishService(), errors)

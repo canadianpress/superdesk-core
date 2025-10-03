@@ -12,11 +12,11 @@ import datetime
 import pytz
 from superdesk.etree import etree
 import html
+from superdesk.core import get_current_app
 from superdesk.io.feed_parsers.newsml_1_2 import NewsMLOneFeedParser
 from superdesk.io.registry import register_feed_parser
 from superdesk.errors import ParserError
 from dateutil.parser import parse as date_parser
-from flask import current_app as app
 from apps.archive.common import format_dateline_to_locmmmddsrc
 
 
@@ -33,7 +33,7 @@ class ANANewsMLOneFeedParser(NewsMLOneFeedParser):
     def can_parse(self, xml):
         return xml.tag == "NewsML"
 
-    def parse(self, xml, provider=None):
+    async def parse(self, xml, provider=None):
         item = {}
         try:
             self.root = xml
@@ -103,7 +103,7 @@ class ANANewsMLOneFeedParser(NewsMLOneFeedParser):
             # Normalise the country code
             country = "GR" if country == "GRC" else country
 
-            cities = app.locators.find_cities()
+            cities = get_current_app().locators.find_cities()
             located = [c for c in cities if c["city"] == city and c["country_code"] == country]
             if len(located) == 1:
                 item["dateline"]["located"] = located[0]
@@ -113,7 +113,7 @@ class ANANewsMLOneFeedParser(NewsMLOneFeedParser):
                 )
             return self.populate_fields(item)
         except Exception as ex:
-            raise ParserError.newsmlOneParserError(ex, provider)
+            raise await ParserError.newsmlOneParserError(ex, provider).send_notifications()
 
     def parse_newslines(self, item, tree):
         parsed_el = self.parse_elements(tree.find("NewsItem/NewsComponent/NewsLines"))

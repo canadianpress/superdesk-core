@@ -12,29 +12,31 @@
 import superdesk
 import bson.errors
 
-from flask import request, current_app as app
+from superdesk.core import get_current_app
+from superdesk.flask import request, Blueprint
 from content_api.errors import FileNotFoundError
 from superdesk import get_resource_service
 from superdesk.upload import upload_url as _upload_url
 from superdesk.storage.superdesk_file import generate_response_for_file
 
-bp = superdesk.Blueprint("assets", __name__)
+bp = Blueprint("assets", __name__)
 
 
 @bp.route("/assets/<path:media_id>", methods=["GET"])
-def get_media_streamed(media_id):
-    if not app.auth.authorized([], "assets", "GET"):
+async def get_media_streamed(media_id):
+    app = get_current_app()
+    if not await app.auth.authorized([], "assets", "GET"):
         return app.auth.authenticate()
     try:
-        media_file = app.media.get(media_id, "upload")
+        media_file = await app.media.get_async(media_id, "upload")
         if not media_file:
             media_id = media_id.split(".")[0]
-            media_file = app.media.get(media_id, "upload")
+            media_file = await app.media.get_async(media_id, "upload")
     except bson.errors.InvalidId:
         media_file = None
     if media_file:
         get_resource_service("api_audit").audit_item({"type": "asset", "uri": request.url}, media_id)
-        return generate_response_for_file(
+        return await generate_response_for_file(
             media_file, cache_for=3600 * 24 * 7, content_disposition="inline"  # 7 days cache
         )
     raise FileNotFoundError("File not found on media storage.")

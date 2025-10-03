@@ -11,13 +11,13 @@
 import pytz
 import datetime
 import superdesk
+from superdesk.core import get_current_app
 from .newsml_2_0 import NewsMLTwoFeedParser
 from superdesk.io.registry import register_feed_parser
 from superdesk.errors import ParserError
 from superdesk.metadata.item import ITEM_TYPE
 from superdesk.io.iptc import subject_codes
 from superdesk.text_utils import get_word_count
-from flask import current_app as app
 from dateutil.parser import parse as date_parser
 from superdesk.etree import parse_html, to_string
 
@@ -39,10 +39,11 @@ class ScoopNewsMLTwoFeedParser(NewsMLTwoFeedParser):
                 return False
         return False
 
-    def parse(self, xml, provider=None):
+    async def parse(self, xml, provider=None):
         self.root = xml
         items = []
         try:
+            app = get_current_app()
             for item_set in xml.findall(self.qname("itemSet")):
                 for item_tree in item_set:
                     # Ignore the packageItem, it has no guid
@@ -82,6 +83,7 @@ class ScoopNewsMLTwoFeedParser(NewsMLTwoFeedParser):
                                 if par.text == "(BusinessDesk)" and pars.index(par) + 1 == len(pars):
                                     par.getparent().remove(par)
                             item["body_html"] = to_string(parsed, remove_root_div=True)
+                        # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
                         locator_map = superdesk.get_resource_service("vocabularies").find_one(req=None, _id="locators")
                         if locator_map:
                             item["place"] = [x for x in locator_map.get("items", []) if x["qcode"].upper() == "NZ"]
@@ -89,7 +91,7 @@ class ScoopNewsMLTwoFeedParser(NewsMLTwoFeedParser):
                         items.append(item)
             return items
         except Exception as ex:
-            raise ParserError.newsmlTwoParserError(ex, provider)
+            raise await ParserError.newsmlTwoParserError(ex, provider).send_notifications()
 
     def parse_header(self, tree):
         """Parse header element, it seems that the header tag is in camel case

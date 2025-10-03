@@ -8,12 +8,19 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
-import superdesk
 import json
-from eve.utils import ParsedRequest, config
+import click
+from eve.utils import ParsedRequest
+
+import superdesk
+from superdesk.resource_fields import ID_FIELD
+
+from .async_cli import cli
 
 
-class DeleteArchivedDocumentCommand(superdesk.Command):
+@cli.command("app:deleteArchivedDocument")
+@click.argument("ids", nargs=-1, required=True)
+async def cli_delete_archived_document(ids):
     """
     Deletes a Text Archive document(s) from both Mongodb and ElasticSearch.
 
@@ -27,9 +34,11 @@ class DeleteArchivedDocumentCommand(superdesk.Command):
 
     """
 
-    capture_all_args = True
+    await DeleteArchivedDocumentCommand().run(list(ids))
 
-    def can_delete_items(self, items):
+
+class DeleteArchivedDocumentCommand:
+    async def can_delete_items(self, items):
         """Checks if the given items are deletable"""
 
         archived_service = superdesk.get_resource_service("archived")
@@ -38,7 +47,7 @@ class DeleteArchivedDocumentCommand(superdesk.Command):
 
         for item in items:
             try:
-                archived_service.validate_delete_action(item, True)
+                await archived_service.validate_delete_action(item, True)
             except Exception as ex:
                 can_delete = False
                 messages.append("-" * 45)
@@ -49,44 +58,41 @@ class DeleteArchivedDocumentCommand(superdesk.Command):
 
         return can_delete
 
-    def get_archived_items(self, ids):
+    async def get_archived_items(self, ids):
         """Returns the items with the given list of ids"""
 
         query = {"query": {"filtered": {"filter": {"and": [{"terms": {"_id": ids}}]}}}}
 
         request = ParsedRequest()
         request.args = {"source": json.dumps(query)}
-        return list(superdesk.get_resource_service("archived").get(req=request, lookup=None))
+        return await (await superdesk.get_resource_service("archived").get_async(req=request, lookup=None)).to_list()
 
-    def delete(self, items):
+    async def delete(self, items):
         """Deletes the given items and any digital package of them"""
 
         archived_service = superdesk.get_resource_service("archived")
         for item in items:
-            articles_to_kill = archived_service.find_articles_to_kill({"_id": item[config.ID_FIELD]}, False)
+            articles_to_kill = await archived_service.find_articles_to_kill({"_id": item[ID_FIELD]}, False)
 
             if not articles_to_kill:
                 continue
 
             for article in articles_to_kill:
-                archived_service.command_delete({"_id": article[config.ID_FIELD]})
-                print("Deleted item {} ".format(article[config.ID_FIELD]))
+                await archived_service.command_delete({"_id": article[ID_FIELD]})
+                print("Deleted item {} ".format(article[ID_FIELD]))
 
-    def run(self, ids):
+    async def run(self, ids):
         if ids and len(ids) > 0:
-            items = self.get_archived_items(ids)
+            items = await self.get_archived_items(ids)
 
             if not items:
                 print("No archived story found with given ids(s)!")
                 return
 
-            if self.can_delete_items(items):
-                self.delete(items)
+            if await self.can_delete_items(items):
+                await self.delete(items)
                 print("Delete has been completed")
 
         else:
             print("Please provide at least one id!")
             return
-
-
-superdesk.command("app:deleteArchivedDocument", DeleteArchivedDocumentCommand())

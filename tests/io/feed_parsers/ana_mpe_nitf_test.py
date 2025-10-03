@@ -15,12 +15,13 @@ from superdesk.etree import etree
 
 
 class TestANACase(TestCase):
-    def setUp(self):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
         dirname = os.path.dirname(os.path.realpath(__file__))
         fixture = os.path.normpath(os.path.join(dirname, "../fixtures", "ana1.xml"))
         provider = {"name": "Test", "source": "ANA"}
         with open(fixture, "rb") as f:
-            self.item = ANANewsMLOneFeedParser().parse(etree.fromstring(f.read()), provider)
+            self.item = await ANANewsMLOneFeedParser().parse(etree.fromstring(f.read()), provider)
 
     def test_headline(self):
         self.assertEqual(self.item["headline"], "Wage employment balance positive in Jan-March")

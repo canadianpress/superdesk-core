@@ -2,7 +2,7 @@ import superdesk
 
 from datetime import timedelta
 from dateutil.rrule import rrule, WEEKLY
-from flask import current_app as app
+from quart import current_app as app
 from typing import TYPE_CHECKING
 from dateutil.rrule import rrule, WEEKLY
 

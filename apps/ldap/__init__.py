@@ -9,11 +9,11 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 from typing import Any
-from flask_babel import lazy_gettext
+from quart_babel import lazy_gettext
 import superdesk
 from apps.auth import AuthResource
 from .ldap import ADAuthService, ADAuth, ImportUserProfileResource, ImportUserProfileService  # noqa
-from .commands import ImportUserProfileFromADCommand  # noqa
+from .commands import cli_users_copyfromad  # noqa
 from .users_service import ADUsersService, UsersResource, is_admin  # NOQA
 
 

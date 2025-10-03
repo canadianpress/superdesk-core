@@ -8,6 +8,8 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
+from typing import Any, Dict, Iterator, Mapping, Optional, cast
+
 import os
 import re
 import sys
@@ -19,18 +21,16 @@ import base64
 import tempfile
 import string
 import logging
-import flask
 
 from uuid import uuid4
 from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 from enum import Enum
 from importlib import import_module
-from eve.utils import config, document_etag
-from typing import Any, Dict, Iterator, Mapping, Optional
+from eve.utils import document_etag
+
 from superdesk.default_settings import ELASTIC_DATE_FORMAT, ELASTIC_DATETIME_FORMAT
 from superdesk.text_utils import get_text
-from flask import current_app as app
 
 
 logger = logging.getLogger(__name__)
@@ -114,7 +114,7 @@ def get_random_token(n=40):
 
     :param n: how many random bytes to generate
     """
-    return base64.b64encode(os.urandom(n)).decode()
+    return base64.urlsafe_b64encode(os.urandom(n)).decode()
 
 
 def import_by_path(path):
@@ -219,7 +219,9 @@ def json_serialize_datetime_objectId(obj):
     Serialize so that objectid and date are converted to appropriate format.
     """
     if isinstance(obj, datetime):
-        return str(datetime.strftime(obj, config.DATE_FORMAT))
+        from superdesk.core import get_app_config
+
+        return str(datetime.strftime(obj, get_app_config("DATE_FORMAT")))
 
     if isinstance(obj, ObjectId):
         return str(obj)
@@ -332,37 +334,37 @@ class AllowedContainer:
 
 
 def jwt_encode(payload: Dict, expiry=None) -> str:
+    from superdesk.core import get_app_config
+
     if expiry:
         payload["exp"] = datetime.now(tz=timezone.utc) + timedelta(days=expiry)
-    payload["iss"] = app.config["APPLICATION_NAME"]
-    token = jwt.encode(payload, app.config["SECRET_KEY"], JWT_ALGO)
+    payload["iss"] = get_app_config("APPLICATION_NAME")
+    secret_key = cast(str, get_app_config("SECRET_KEY"))
+    token = jwt.encode(payload, secret_key, JWT_ALGO)
     if isinstance(token, str):
         return token
     return token.decode()
 
 
 def jwt_decode(token) -> Optional[Dict]:
+    from superdesk.core import get_app_config
+
+    secret_key = cast(str, get_app_config("SECRET_KEY"))
     try:
-        return jwt.decode(token, app.config["SECRET_KEY"], algorithms=[JWT_ALGO])
+        return jwt.decode(token, secret_key, algorithms=[JWT_ALGO])
     except jwt.InvalidSignatureError:
         return None
 
 
 def get_cors_headers(methods="*"):
+    from superdesk.core import get_app_config
+
     return [
-        ("Access-Control-Allow-Origin", app.config["CLIENT_URL"]),
-        ("Access-Control-Allow-Headers", ",".join(app.config["X_HEADERS"])),
+        ("Access-Control-Allow-Origin", get_app_config("CLIENT_URL")),
+        ("Access-Control-Allow-Headers", ",".join(get_app_config("X_HEADERS") or [])),
         ("Access-Control-Allow-Credentials", "true"),
         ("Access-Control-Allow-Methods", methods),
     ]
-
-
-def abort(status: int, message: str) -> None:
-    """Will return a json response with proper CORS headers."""
-    response = flask.make_response({"message": message}, status)
-    for key, val in get_cors_headers():
-        response.headers[key] = val
-    flask.abort(response)
 
 
 def get_list_chunks(items, chunk_size=100):
@@ -386,3 +388,29 @@ def format_content_type_name(item: Dict[str, str], default_name: str) -> str:
     """
     name = item.get("output_name") or item.get("label", default_name)
     return re.compile("[^0-9a-zA-Z_]").sub("", name)
+
+
+def flatten(nested_list) -> list:
+    """
+    Recursively flattens an arbitrarily nested list into a single flat list.
+
+    Returns:
+        list: A single flat list containing all elements from the nested structure.
+    """
+    result = []
+    for i in nested_list:
+        if isinstance(i, list):
+            result.extend(flatten(i))
+        else:
+            result.append(i)
+    return result
+
+
+def join_url_parts(*parts) -> str:
+    """
+    Join a list of URL parts together, ensuring each part is a valid URL segment
+
+    :param parts: The parts of the URL to join
+    :return: A string of the joined URL
+    """
+    return "/".join(str(part).strip("/") for part in parts if part)

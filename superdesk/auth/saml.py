@@ -33,11 +33,14 @@ Service provider config for superdesk in ``settings.json`` file example::
 
 import superdesk
 import logging
+import quart
 
 from urllib.parse import urlparse
 
-from flask import current_app as app, request, redirect, make_response, session, jsonify, json
+from superdesk.core import get_app_config
+from superdesk.flask import request, redirect, make_response, session, Blueprint
 from superdesk.auth import auth_user
+
 
 try:
     from onelogin.saml2.auth import OneLogin_Saml2_Auth
@@ -51,7 +54,7 @@ SESSION_NAME_ID = "samlNameId"
 SESSION_SESSION_ID = "samlSessionIndex"
 SESSION_USERDATA_KEY = "samlUserdata"
 
-bp = superdesk.Blueprint("saml", __name__)
+bp = Blueprint("saml", __name__)
 logger = logging.getLogger(__name__)
 
 
@@ -65,22 +68,23 @@ def init_app(app) -> None:
 
 
 def init_saml_auth(req):
-    auth = OneLogin_Saml2_Auth(req, custom_base_path=app.config["SAML_PATH"])
+    auth = OneLogin_Saml2_Auth(req, custom_base_path=get_app_config("SAML_PATH"))
     return auth
 
 
-def prepare_flask_request(request):
+async def prepare_request(request: quart.Request) -> dict:
     url_data = urlparse(request.url)
     scheme = request.scheme
-    if app.config.get("SERVER_URL"):
-        scheme = urlparse(app.config["SERVER_URL"]).scheme or request.scheme
+    server_url = get_app_config("SERVER_URL")
+    if server_url:
+        scheme = urlparse(server_url).scheme or request.scheme
     return {
         "https": "on" if scheme == "https" else "off",
         "http_host": request.host,
         "server_port": url_data.port,
         "script_name": request.path,
         "get_data": request.args.copy(),
-        "post_data": request.form.copy(),
+        "post_data": (await request.form).copy(),
     }
 
 
@@ -106,8 +110,8 @@ def get_userdata(saml_data):
 
 
 @bp.route("/login/saml", methods=["GET", "POST"])
-def index():
-    req = prepare_flask_request(request)
+async def index():
+    req = await prepare_request(request)
     auth = init_saml_auth(req)
     errors = []
 
@@ -119,7 +123,7 @@ def index():
         if SESSION_SESSION_ID in session:
             session_index = session[SESSION_SESSION_ID]
         return redirect(auth.logout(name_id=name_id, session_index=session_index))
-    elif "acs" in request.args or request.form:
+    elif "acs" in request.args or await request.form:
         auth.process_response()
         errors = auth.get_errors()
         if len(errors) == 0:
@@ -128,13 +132,11 @@ def index():
             session[SESSION_USERDATA_KEY] = auth.get_attributes()
         else:
             logger.error("SAML %s reason=%s", errors, auth.get_last_error_reason())
-            return jsonify(
-                {
-                    "req": req,
-                    "errors": errors,
-                    "error_reason": auth.get_last_error_reason(),
-                }
-            )
+            return {
+                "req": req,
+                "errors": errors,
+                "error_reason": auth.get_last_error_reason(),
+            }
     elif "sls" in request.args:
 
         def dscb():
@@ -147,14 +149,14 @@ def index():
                 return redirect(url)
 
     if session.get(SESSION_NAME_ID):
-        return auth_user(session[SESSION_NAME_ID], get_userdata(session[SESSION_USERDATA_KEY]))
+        return await auth_user(session[SESSION_NAME_ID], get_userdata(session[SESSION_USERDATA_KEY]))
 
     return redirect(auth.login())
 
 
 @bp.route("/login/saml_metadata")
-def metadata():
-    req = prepare_flask_request(request)
+async def metadata():
+    req = await prepare_request(request)
     auth = init_saml_auth(req)
     settings = auth.get_settings()
     metadata = settings.get_sp_metadata()

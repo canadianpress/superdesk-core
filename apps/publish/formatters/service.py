@@ -10,22 +10,23 @@
 
 import json
 import logging
+from inspect import isawaitable
 
 from superdesk import get_resource_service
-from superdesk.services import BaseService
+from superdesk.eve_async.service import AsyncBaseService
 from superdesk.errors import SuperdeskApiError
 from superdesk.publish.formatters import get_all_formatters
 from superdesk.utils import ListCursor
 from superdesk.validation import ValidationError
 from apps.publish.content.common import ITEM_PUBLISH
 from apps.content_types import apply_schema
-from flask_babel import _
+from quart_babel import gettext as _
 
 logger = logging.getLogger(__name__)
 
 
-class FormattersService(BaseService):
-    def get(self, req, lookup):
+class FormattersService(AsyncBaseService):
+    async def get_async(self, req, lookup):
         formatters = get_all_formatters()
 
         if req.args.get("criteria"):
@@ -37,14 +38,14 @@ class FormattersService(BaseService):
         formatters = get_all_formatters()
         return next((f for f in formatters if type(f).__name__ == name), None)
 
-    def _validate(self, doc):
+    async def _validate(self, doc):
         """Validates the given story for publish action"""
         validate_item = {"act": ITEM_PUBLISH, "type": doc["type"], "validate": doc}
-        validation_errors = get_resource_service("validate").validate(validate_item)
+        validation_errors = await get_resource_service("validate").validate(validate_item)
         if validation_errors:
             raise ValidationError(validation_errors)
 
-    def create(self, docs, **kwargs):
+    async def create_async(self, docs, **kwargs):
         service = get_resource_service("archive")
         doc = docs[0]
         formatter_name = doc.get("formatter_name")
@@ -59,14 +60,19 @@ class FormattersService(BaseService):
 
         if "article_id" in doc:
             article_id = doc.get("article_id")
-            article = service.find_one(req=None, _id=article_id)
+            article = await service.find_one_async(req=None, _id=article_id)
 
             if not article:
                 raise SuperdeskApiError.badRequestError(_("Article not found!"))
 
             try:
-                self._validate(article)
-                sequence, formatted_doc = formatter.format(apply_schema(article), {"_id": "0"}, None)[0]
+                await self._validate(article)
+                response = await formatter.format(apply_schema(article), None, None)
+                if isawaitable(response):
+                    sequence, formatted_doc = (await response)[0]
+                else:
+                    sequence, formatted_doc = response[0]
+
                 formatted_doc = formatted_doc.replace("''", "'")
 
                 # respond only with the formatted output if output_field is configured

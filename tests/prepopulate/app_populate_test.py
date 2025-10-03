@@ -18,23 +18,25 @@ from apps.prepopulate.app_populate import AppPopulateCommand
 
 
 class AppPopulateValidatorsTest(TestCase):
-    def setUp(self):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
         self.filename = os.path.join(os.path.abspath(os.path.dirname(__file__)), "validators.json")
         self.json_data = [{"_id": "publish", "schema": {"headline": {"type": "string"}}}]
 
         with open(self.filename, "w+") as file:
             json.dump(self.json_data, file)
 
-    def test_populate_validators(self):
+    async def test_populate_validators(self):
         cmd = AppPopulateCommand()
-        with self.app.test_request_context(self.app.config.get("URL_PREFIX")):
-            cmd.run(self.filename)
+        async with self.app.test_request_context(self.app.config.get("URL_PREFIX")):
+            await cmd.run(self.filename)
             service = get_resource_service("validators")
 
             for item in self.json_data:
-                data = service.find_one(_id=item["_id"], req=None)
+                data = await service.find_one_async(_id=item["_id"], req=None)
                 self.assertEqual(data["_id"], item["_id"])
                 self.assertDictEqual(data["schema"], item["schema"])
 
-    def tearDown(self):
+    async def asyncTearDown(self):
+        await super().asyncTearDown()
         os.remove(self.filename)

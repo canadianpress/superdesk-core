@@ -10,8 +10,12 @@
 
 import logging
 from apps.auth import get_user
-from flask import request, current_app as app
-from superdesk import get_resource_service, Service, config
+
+from superdesk.core import get_current_app, get_app_config
+from superdesk.resource_fields import ID_FIELD
+from superdesk.flask import request
+from superdesk import get_resource_service
+from superdesk.eve_async import AsyncBaseService
 from superdesk.metadata.item import ITEM_STATE, CONTENT_STATE, metadata_schema
 from superdesk.resource import Resource
 from apps.archive.common import ARCHIVE, ITEM_CANCEL_CORRECTION, ITEM_CORRECTION
@@ -19,7 +23,8 @@ from superdesk.metadata.utils import item_url
 from superdesk.workflow import is_workflow_state_transition_valid
 from superdesk.errors import SuperdeskApiError, InvalidStateTransitionError
 from superdesk.notification import push_notification
-from flask_babel import _
+from superdesk.types import DesksResourceModel
+from quart_babel import gettext as _
 
 logger = logging.getLogger(__name__)
 
@@ -40,28 +45,28 @@ class ArchiveCorrectionResource(Resource):
     privileges = {"PATCH": "correct"}
 
 
-class ArchiveCorrectionService(Service):
-    def on_update(self, updates, original):
+class ArchiveCorrectionService(AsyncBaseService):
+    async def on_update_async(self, updates, original):
         remove_correction = request.args.get("remove_correction") == "true"
         self._validate_correction(original)
         archive_service = get_resource_service(ARCHIVE)
         published_service = get_resource_service("published")
-        archive_item = archive_service.find_one(req=None, _id=original.get(config.ID_FIELD))
+        archive_item = await archive_service.find_one_async(req=None, _id=original.get(ID_FIELD))
 
         if remove_correction:
-            published_article = published_service.find_one(
+            published_article = await published_service.find_one_async(
                 req=None, guid=original.get("guid"), state=CONTENT_STATE.BEING_CORRECTED
             )
 
         elif original.get("state") == CONTENT_STATE.CORRECTED:
-            published_article = published_service.find_one(
+            published_article = await published_service.find_one_async(
                 req=None,
                 guid=original.get("guid"),
                 correction_sequence=original.get("correction_sequence"),
                 state=CONTENT_STATE.CORRECTED,
             )
         else:
-            published_article = published_service.find_one(req=None, guid=original.get("guid"))
+            published_article = await published_service.find_one_async(req=None, guid=original.get("guid"))
 
         # updates for item in archive.
         if not remove_correction:
@@ -89,14 +94,14 @@ class ArchiveCorrectionService(Service):
         # set working stage when we create correction
         if archive_item.get("task", {}).get("desk"):
             archive_item_updates.update({"task": archive_item.get("task")})
-            desk = get_resource_service("desks").find_one(req=None, _id=archive_item["task"]["desk"]) or {}
+            desk = await DesksResourceModel.get_service().find_by_id_raw(archive_item["task"]["desk"])
             if desk:
                 archive_item_updates["task"].update({"stage": desk.get("working_stage")})
 
         try:
             # modify item in published.
-            _published_item = published_service.system_update(
-                published_article.get(config.ID_FIELD), published_item_updates, published_article
+            _published_item = await published_service.system_update_async(
+                published_article.get(ID_FIELD), published_item_updates, published_article
             )
             assert (
                 remove_correction
@@ -108,8 +113,9 @@ class ArchiveCorrectionService(Service):
             ), "Being corrected is not generated"
 
             # modify item in archive.
-            archive_service.system_update(archive_item.get(config.ID_FIELD), archive_item_updates, archive_item)
-            app.on_archive_item_updated(archive_item_updates, archive_item, ITEM_CORRECTION)
+            await archive_service.system_update_async(archive_item.get(ID_FIELD), archive_item_updates, archive_item)
+            app = get_current_app().as_any()
+            await app.on_archive_item_updated.call_async(archive_item_updates, archive_item, ITEM_CORRECTION)
 
         except Exception as e:
             logger.exception(e)
@@ -118,7 +124,7 @@ class ArchiveCorrectionService(Service):
             )
 
         user = get_user(required=True)
-        push_notification("item:correction", item=original.get(config.ID_FIELD), user=str(user.get(config.ID_FIELD)))
+        push_notification("item:correction", item=original.get(ID_FIELD), user=str(user.get(ID_FIELD)))
 
     def _validate_correction(self, original):
         """Validates the article to be corrected.
@@ -129,8 +135,7 @@ class ArchiveCorrectionService(Service):
         if not original:
             raise SuperdeskApiError.notFoundError(message=_("Cannot find the article"))
 
-        if (
-            not is_workflow_state_transition_valid("correction", original[ITEM_STATE])
-            and not config.ALLOW_UPDATING_SCHEDULED_ITEMS
+        if not is_workflow_state_transition_valid("correction", original[ITEM_STATE]) and not get_app_config(
+            "ALLOW_UPDATING_SCHEDULED_ITEMS"
         ):
             raise InvalidStateTransitionError()

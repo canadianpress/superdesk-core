@@ -13,16 +13,16 @@
 import io
 import logging
 
-from typing import BinaryIO, Dict, List, Literal, Mapping, TypedDict, Union
+from typing import BinaryIO, Dict, List, Union
 
 from superdesk.text_utils import decode
 from PIL import Image, ExifTags
 from PIL import IptcImagePlugin
 from PIL.TiffImagePlugin import IFDRational
-from flask import json
 
-from superdesk.types import Item
-from .iim_codes import TAG, iim_codes
+from superdesk.core import json
+from superdesk.media.metadata_mapping import MediaMetadata
+from .iim_codes import iim_codes
 
 logger = logging.getLogger(__name__)
 
@@ -93,18 +93,24 @@ def get_meta(file_stream):
 
     exif_meta = {}
     for k, v in exif.items():
+        print(f"Attempting exif key {k}, val {v}")
         try:
             key = ExifTags.TAGS[k].strip()
         except KeyError:
+            print("\tKey not found")
             continue
 
+        print(f"\tUpdated key = {key}")
+
         if key == "GPSInfo":
+            print("\tKey is for GPS Info")
             # lookup GPSInfo description key names
             value = {
                 ExifTags.GPSTAGS[vk].strip(): convert_exif_value(vv, vk)
                 for vk, vv in rv.get_ifd(k).items()
                 if is_serializable(vv)
             }
+            print(value)
             exif_meta[key] = value
         elif is_serializable(v):
             value = v.decode("UTF-8") if isinstance(v, bytes) else v
@@ -166,44 +172,7 @@ def get_meta_iptc(file_stream: BinaryIO):
     return metadata
 
 
-class PhotoMetadata(TypedDict, total=False):
-    Description: str
-    DescriptionWriter: str
-    Headline: str
-    Instructions: str
-    JobId: str
-    Title: str
-    Creator: List[str]
-    CreatorsJobtitle: str
-    City: str
-    ProvinceState: str
-    Country: str
-    CountryCode: str
-    CopyrightNotice: str
-    CreditLine: str
-
-
-PhotoMetadataKeys = Literal[
-    "Description",
-    "DescriptionWriter",
-    "Headline",
-    "Instructions",
-    "JobId",
-    "Title",
-    "Creator",
-    "CreatorsJobtitle",
-    "City",
-    "ProvinceState",
-    "Country",
-    "CountryCode",
-    "CopyrightNotice",
-    "CreditLine",
-]
-
-PhotoMetadataMapping = Dict[str, PhotoMetadataKeys]
-
-
-def read_metadata(input: bytes) -> PhotoMetadata:
+def read_metadata(input: bytes) -> MediaMetadata:
     """Reads the metadata from the image file.
 
     @param file_stream: stream
@@ -237,7 +206,7 @@ def get_xmp_lang_string(value, lang="x-default"):
     return ""
 
 
-def write_metadata(input: bytes, metadata: PhotoMetadata) -> bytes:
+def write_metadata(input: bytes, metadata: MediaMetadata) -> bytes:
     """Writes the metadata to the image file.
 
     @param file_stream: stream
@@ -269,19 +238,3 @@ def write_metadata(input: bytes, metadata: PhotoMetadata) -> bytes:
         img.modify_xmp(xmp)
         img.modify_iptc(iptc)
         return img.get_bytes()
-
-
-def get_metadata_from_item(item: Item, mapping: PhotoMetadataMapping) -> PhotoMetadata:
-    metadata = PhotoMetadata()
-    for src, dest in mapping.items():
-        value = get_item_value(item, src)
-        if value is not None:
-            metadata[dest] = value
-    return metadata
-
-
-def get_item_value(item, src: str):
-    if src.startswith("extra."):
-        extra = item.get("extra") or {}
-        return extra.get(src[6:])
-    return item.get(src)

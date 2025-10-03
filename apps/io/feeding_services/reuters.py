@@ -12,8 +12,9 @@ import datetime
 import traceback
 import superdesk
 import requests
-from flask import current_app as app
 
+from superdesk.core import get_app_config
+from superdesk.resource_fields import ID_FIELD
 from superdesk.errors import IngestApiError
 from superdesk.etree import etree, ParseError
 from superdesk.io.registry import register_feeding_service, register_feeding_service_parser
@@ -21,7 +22,7 @@ from superdesk.io.feeding_services.http_service import HTTPFeedingService
 from superdesk.logging import logger
 from superdesk.utc import utcnow
 from urllib.parse import urlparse, urlunparse
-from flask_babel import _
+from quart_babel import gettext as _
 
 
 class ReutersHTTPFeedingService(HTTPFeedingService):
@@ -67,11 +68,11 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
 
     session = None
 
-    def _update(self, provider, update):
+    async def _update(self, provider, update):
         updated = utcnow()
 
         last_updated = provider.get("last_updated")
-        ttl_minutes = app.config["INGEST_EXPIRY_MINUTES"]
+        ttl_minutes = get_app_config("INGEST_EXPIRY_MINUTES")
         if not last_updated or last_updated < updated - datetime.timedelta(minutes=ttl_minutes):
             last_updated = updated - datetime.timedelta(minutes=ttl_minutes)
 
@@ -85,11 +86,11 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
         provider_config.setdefault("auth_url", "https://commerce.reuters.com/rmd/rest/xml/login")
         self.URL = provider_config.get("url")
 
-        for channel in self._get_channels():
-            ids = self._get_article_ids(channel, last_updated, updated)
+        for channel in await self._get_channels():
+            ids = await self._get_article_ids(channel, last_updated, updated)
             for id in ids:
                 try:
-                    items = self.fetch_ingest(id)
+                    items = await self.fetch_ingest(id)
                     if items:
                         yield items
                 # if there was an exception processing the one of the bunch log it and continue
@@ -97,16 +98,16 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
                     logger.warn("Reuters item {} has not been retrieved".format(id))
                     logger.exception(ex)
 
-    def _get_channels(self):
+    async def _get_channels(self):
         """Get subscribed channels."""
         channels = []
-        tree = self._get_tree("channels")
+        tree = await self._get_tree("channels")
         for channel in tree.findall("channelInformation"):
             channels.append(channel.find("alias").text)
 
         return channels
 
-    def _get_tree(self, endpoint, payload=None):
+    async def _get_tree(self, endpoint, payload=None):
         """Get xml response for given API endpoint and payload.
 
         :param: endpoint
@@ -118,7 +119,7 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
         if payload is None:
             payload = {}
 
-        payload["token"] = self._get_auth_token(self.provider, update=True)
+        payload["token"] = await self._get_auth_token(self.provider, update=True)
         url = self._get_absolute_url(endpoint)
 
         if not self.session:
@@ -133,16 +134,16 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
                     logger.warn("Reuters API timeout retrying, retries {}".format(retries))
                     retries += 1
                     continue
-                raise IngestApiError.apiTimeoutError(ex, self.provider)
+                raise await IngestApiError.apiTimeoutError(ex, self.provider).send_notifications()
             except requests.exceptions.TooManyRedirects as ex:
                 # Tell the user their URL was bad and try a different one
-                raise IngestApiError.apiRedirectError(ex, self.provider)
+                raise await IngestApiError.apiRedirectError(ex, self.provider).send_notifications()
             except requests.exceptions.RequestException as ex:
                 # catastrophic error. bail.
-                raise IngestApiError.apiRequestError(ex, self.provider)
+                raise await IngestApiError.apiRequestError(ex, self.provider).send_notifications()
             except Exception as error:
                 traceback.print_exc()
-                raise IngestApiError.apiGeneralError(error, self.provider)
+                raise await IngestApiError.apiGeneralError(error, self.provider).send_notifications()
 
             if response.status_code == 404:
                 raise LookupError(_("Not found {payload}").format(payload=payload))
@@ -153,13 +154,13 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
             return etree.fromstring(response.content)  # workaround for http mock lib
         except UnicodeEncodeError as error:
             traceback.print_exc()
-            raise IngestApiError.apiUnicodeError(error, self.provider)
+            raise await IngestApiError.apiUnicodeError(error, self.provider).send_notifications()
         except ParseError as error:
             traceback.print_exc()
-            raise IngestApiError.apiParseError(error, self.provider)
+            raise await IngestApiError.apiParseError(error, self.provider).send_notifications()
         except Exception as error:
             traceback.print_exc()
-            raise IngestApiError.apiGeneralError(error, self.provider)
+            raise await IngestApiError.apiGeneralError(error, self.provider).send_notifications()
 
     def _get_absolute_url(self, endpoint):
         """
@@ -170,7 +171,7 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
         """
         return "/".join([self.URL, endpoint])
 
-    def _get_article_ids(self, channel, last_updated, updated):
+    async def _get_article_ids(self, channel, last_updated, updated):
         """
         Get article ids which should be upserted also save the poll token that is returned.
         """
@@ -186,7 +187,7 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
             payload["dateRange"] = "%s-%s" % (self._format_date(last_updated), self._format_date(updated))
             logger.info("Reuters requesting channel {} with dateRange {}".format(channel, payload["dateRange"]))
 
-        tree = self._get_tree("items", payload)
+        tree = await self._get_tree("items", payload)
         status_code = tree.find("status").get("code") if tree.tag == "results" else tree.get("code")
         # check the returned status
         if status_code != "10":
@@ -200,7 +201,7 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
                     )
                 )
                 if tree.find("error").get("code") == "2100":
-                    self._save_poll_token(channel, None)
+                    await self._save_poll_token(channel, None)
                     logger.warn("Reuters channel invalid token reseting {}".format(status_code))
                 return ids
 
@@ -210,7 +211,7 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
             # a new token indicated new content
             if poll_token.text != last_poll_token:
                 logger.info("Reuters channel {} new token {}".format(channel, poll_token.text))
-                self._save_poll_token(channel, poll_token.text)
+                await self._save_poll_token(channel, poll_token.text)
             else:
                 # the token has not changed, so nothing new
                 logger.info("Reuters channel {} nothing new".format(channel))
@@ -226,7 +227,7 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
 
         return ids
 
-    def _save_poll_token(self, channel, poll_token):
+    async def _save_poll_token(self, channel, poll_token):
         """Saves the poll token for the passed channel in the config section of the
 
         :param channel:
@@ -235,14 +236,14 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
         """
         # get the provider in case it has been updated by another channel
         ingest_provider_service = superdesk.get_resource_service("ingest_providers")
-        provider = ingest_provider_service.find_one(req=None, _id=self.provider[superdesk.config.ID_FIELD])
+        provider = await ingest_provider_service.find_one_async(req=None, _id=self.provider[ID_FIELD])
         provider_token = provider.get("tokens")
         if "poll_tokens" not in provider_token:
             provider_token["poll_tokens"] = {channel: poll_token}
         else:
             provider_token["poll_tokens"][channel] = poll_token
         upd_provider = {"tokens": provider_token}
-        ingest_provider_service.system_update(self.provider[superdesk.config.ID_FIELD], upd_provider, self.provider)
+        await ingest_provider_service.system_update_async(self.provider[ID_FIELD], upd_provider, self.provider)
 
     def _get_poll_token(self, channel):
         """Get the poll token from provider config if it is available.
@@ -256,14 +257,14 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
     def _format_date(self, date):
         return date.strftime(self.DATE_FORMAT)
 
-    def fetch_ingest(self, id):
-        items = self._parse_items(id)
+    async def fetch_ingest(self, id):
+        items = await self._parse_items(id)
         result_items = []
         while items:
             item = items.pop()
             self.localize_timestamps(item)
             try:
-                items.extend(self._fetch_items_in_package(item))
+                items.extend(await self._fetch_items_in_package(item))
                 result_items.append(item)
             except LookupError as err:
                 self.log_item_error(err, item, self.provider)
@@ -271,20 +272,20 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
 
         return result_items
 
-    def _parse_items(self, id):
+    async def _parse_items(self, id):
         """
         Parse item message and return given items.
         """
 
         payload = {"id": id}
-        tree = self._get_tree("item", payload)
+        tree = await self._get_tree("item", payload)
 
-        parser = self.get_feed_parser(self.provider, tree)
-        items = parser.parse(tree, self.provider)
+        parser = await self.get_feed_parser(self.provider, tree)
+        items = await parser.parse(tree, self.provider)
 
         return items
 
-    def _fetch_items_in_package(self, item):
+    async def _fetch_items_in_package(self, item):
         """
         Fetch remote assets for given item.
         """
@@ -292,14 +293,14 @@ class ReutersHTTPFeedingService(HTTPFeedingService):
         for group in item.get("groups", []):
             for ref in group.get("refs", []):
                 if "residRef" in ref:
-                    items.extend(self._parse_items(ref.get("residRef")))
+                    items.extend(await self._parse_items(ref.get("residRef")))
 
         return items
 
-    def prepare_href(self, href, mimetype=None):
+    async def prepare_href_async(self, href, mimetype=None):
         (scheme, netloc, path, params, query, fragment) = urlparse(href)
         new_href = urlunparse((scheme, netloc, path, "", "", ""))
-        return "%s?auth_token=%s" % (new_href, self._get_auth_token(self.provider, update=True))
+        return "%s?auth_token=%s" % (new_href, await self._get_auth_token(self.provider, update=True))
 
 
 register_feeding_service(ReutersHTTPFeedingService)

@@ -14,8 +14,7 @@ from datetime import timedelta
 import arrow
 import requests
 
-from eve.utils import config
-
+from superdesk.resource_fields import ID_FIELD
 from superdesk import get_resource_service
 from superdesk.errors import IngestApiError
 from superdesk.io.feeding_services import FeedingService
@@ -43,7 +42,7 @@ class HTTPFeedingService(FeedingService, metaclass=ABCMeta):
         super().__init__()
         self.token = None
 
-    def _generate_token_and_update_provider(self, provider):
+    async def _generate_token_and_update_provider(self, provider):
         """
         Generates Authentication Token and updates the given provider with the authentication token.
 
@@ -52,14 +51,14 @@ class HTTPFeedingService(FeedingService, metaclass=ABCMeta):
         :return: Authentication Token
         :rtype: str
         """
-        token = {"auth_token": self._generate_auth_token(provider), "created": utcnow()}
-        get_resource_service("ingest_providers").system_update(
-            provider[config.ID_FIELD], updates={"tokens": token}, original=provider
+        token = {"auth_token": await self._generate_auth_token(provider), "created": utcnow()}
+        await get_resource_service("ingest_providers").system_update_async(
+            provider[ID_FIELD], updates={"tokens": token}, original=provider
         )
         provider["tokens"] = token
         return token["auth_token"]
 
-    def _generate_auth_token(self, provider):
+    async def _generate_auth_token(self, provider):
         """
         Generates Authentication Token as per the configuration in Ingest Provider.
 
@@ -73,7 +72,7 @@ class HTTPFeedingService(FeedingService, metaclass=ABCMeta):
 
         auth_url = provider.get("config", {}).get("auth_url", None)
         if not auth_url:
-            raise IngestApiError.apiGeneralError(
+            raise await IngestApiError.apiGeneralError(
                 provider=provider,
                 exception=KeyError(
                     """
@@ -83,7 +82,7 @@ class HTTPFeedingService(FeedingService, metaclass=ABCMeta):
                         provider["name"]
                     )
                 ),
-            )
+            ).send_notifications()
 
         payload = {
             "username": provider.get("config", {}).get("username", ""),
@@ -96,7 +95,8 @@ class HTTPFeedingService(FeedingService, metaclass=ABCMeta):
                 response.raise_for_status()
             except Exception:
                 err = IngestApiError.apiAuthError(provider=provider)
-                self.close_provider(provider, err, force=True)
+                await self.close_provider(provider, err, force=True)
+                await err.send_notifications()
                 raise err
 
         tree = etree.fromstring(response.content)  # workaround for http mock lib
@@ -117,7 +117,7 @@ class HTTPFeedingService(FeedingService, metaclass=ABCMeta):
 
         return created + ttl >= utcnow() and token.get("auth_token")
 
-    def _get_auth_token(self, provider, update=False):
+    async def _get_auth_token(self, provider, update=False):
         """
         Gets authentication token for given provider instance and save it in db based on the given update flag.
 
@@ -134,4 +134,4 @@ class HTTPFeedingService(FeedingService, metaclass=ABCMeta):
         if token and self._is_valid_token(token):
             return token.get("auth_token")
 
-        return self._generate_token_and_update_provider(provider) if update else ""
+        return await self._generate_token_and_update_provider(provider) if update else ""

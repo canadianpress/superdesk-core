@@ -9,14 +9,22 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 import re
+
 import superdesk
 import logging
 import jinja2.exceptions
 
-from flask import g, render_template_string, current_app as app
 from copy import deepcopy
-from superdesk.services import BaseService
-from superdesk import Resource, Service, config, get_resource_service
+from eve.utils import ParsedRequest
+
+from superdesk.core import get_current_app, get_app_config
+from superdesk.eve_async.cursors import AsyncEveCursor
+from superdesk.eve_async.service import AsyncBaseService
+from superdesk.types import DesksResourceModel
+from superdesk.resource_fields import ID_FIELD, DATE_CREATED, LAST_UPDATED, ETAG, VERSION, ITEMS
+from superdesk.flask import render_template_string
+from superdesk.types import ContentTypesResourceModel
+from superdesk import Resource, get_resource_service
 from superdesk.utils import SuperdeskBaseEnum, plaintext_filter
 from superdesk.resource import build_custom_hateoas
 from superdesk.utc import utcnow, local_to_utc, utc_to_local
@@ -29,7 +37,7 @@ from apps.archive.common import (
     CUSTOM_HATEOAS,
     item_schema,
     format_dateline_to_locmmmddsrc,
-    insert_into_versions,
+    insert_into_versions_async,
 )
 from apps.auth import get_user
 
@@ -37,7 +45,7 @@ from superdesk.lock import lock, unlock
 from superdesk.celery_task_utils import get_lock_id
 from croniter import croniter
 from datetime import datetime
-from flask_babel import _
+from quart_babel import gettext as _
 from superdesk.notification import push_notification
 from superdesk import editor_utils
 
@@ -46,11 +54,11 @@ CONTENT_TEMPLATE_PRIVILEGE = CONTENT_TEMPLATE_RESOURCE
 KILL_TEMPLATE_NOT_REQUIRED_FIELDS = ["schedule", "dateline", "template_desks", "schedule_desk", "schedule_stage"]
 PLAINTEXT_FIELDS = {"headline"}
 TEMPLATE_DATA_IGNORE_FIELDS = {  # fields to be ignored when creating item from template
-    config.ID_FIELD,
-    config.LAST_UPDATED,
-    config.DATE_CREATED,
-    config.ETAG,
-    config.VERSION,
+    ID_FIELD,
+    LAST_UPDATED,
+    DATE_CREATED,
+    ETAG,
+    VERSION,
     "task",
     "firstcreated",
     "versioncreated",
@@ -127,7 +135,7 @@ def push_template_notification(docs, event="template:update"):
         if doc.get("template_desks"):
             template_desks.update([str(template) for template in doc.get("template_desks")])
 
-    push_notification(event, user=str(user.get(config.ID_FIELD, "")), desks=list(template_desks))
+    push_notification(event, user=str(user.get(ID_FIELD, "")), desks=list(template_desks))
 
 
 class ContentTemplatesResource(Resource):
@@ -192,9 +200,9 @@ class ContentTemplatesResource(Resource):
     }
 
 
-class ContentTemplatesService(BaseService):
-    def get(self, req, lookup):
-        active_user = g.get("user", {})
+class ContentTemplatesService(AsyncBaseService):
+    async def get_async(self, req: ParsedRequest | None, lookup: dict | None) -> AsyncEveCursor:
+        active_user = get_current_app().get_current_user_dict() or {}
         privileges = active_user.get("active_privileges", {})
         if not lookup:
             lookup = {}
@@ -208,11 +216,11 @@ class ContentTemplatesService(BaseService):
         else:
             if not privileges.get("personal_template"):
                 lookup.update({"$or": [{"is_public": True}, {"user": active_user.get("_id")}]})
-        results = super().get(req, lookup)
+        results = await super().get_async(req, lookup)
 
         return results
 
-    def on_create(self, docs):
+    async def on_create_async(self, docs: list[dict]) -> None:
         for doc in docs:
             self._validate_privileges(doc, action="create")
             doc["template_name"] = doc["template_name"].lower().strip()
@@ -230,13 +238,13 @@ class ContentTemplatesService(BaseService):
             if doc.get("template_type") == TemplateType.KILL.value:
                 self._validate_kill_template(doc)
             if get_user():
-                doc.setdefault("user", get_user()[config.ID_FIELD])
+                doc.setdefault("user", get_user()[ID_FIELD])
             self._validate_template_desks(doc)
 
-    def on_created(self, docs):
+    async def on_created_async(self, docs: list[dict]) -> None:
         push_template_notification(docs)
 
-    def on_update(self, updates, original):
+    async def on_update_async(self, updates: dict, original: dict) -> None:
         self._validate_privileges(original, action="update")
         if (
             updates.get("template_type")
@@ -257,17 +265,17 @@ class ContentTemplatesService(BaseService):
             # if profile is changed remove unnecessary fields from template
             original_template = deepcopy(original)
             original_template.update(updates)
-            profile = get_resource_service("content_types").find_one(req=None, _id=profile_id)
+            profile = await get_resource_service("content_types").find_one_async(req=None, _id=profile_id)
             data, _ = self._reset_fields(original_template, profile)
             updates["data"] = data
 
-    def on_updated(self, updates, original):
+    async def on_updated_async(self, updates: dict, original: dict) -> None:
         push_template_notification([updates, original])
 
-    def on_fetched(self, docs):
-        self.enhance_items(docs[config.ITEMS])
+    async def on_fetched_async(self, docs: dict) -> None:
+        self.enhance_items(docs[ITEMS])
 
-    def on_fetched_item(self, doc):
+    async def on_fetched_item_async(self, doc: dict) -> None:
         self.enhance_items([doc])
 
     def enhance_items(self, items):
@@ -283,29 +291,30 @@ class ContentTemplatesService(BaseService):
             schedule["cron_list"] = [cron_entry]
             schedule.pop("create_at", None)
 
-    def on_delete(self, doc):
+    async def on_delete_async(self, doc: dict) -> None:
         self._validate_privileges(doc, action="delete")
         if doc.get("template_type") == TemplateType.KILL.value:
             raise SuperdeskApiError.badRequestError(_("Kill templates can not be deleted."))
 
-    def on_deleted(self, doc):
+    async def on_deleted_async(self, doc: dict) -> None:
         push_template_notification([doc])
 
-    def get_scheduled_templates(self, now):
+    async def get_scheduled_templates(self, now):
         """Get the template by schedule
 
         :param datetime now:
         :return MongoCursor:
         """
         query = {"next_run": {"$lte": now}, "schedule.is_active": True}
-        return self.find(query)
+        return await self.find_async(query)
 
-    def get_templates_by_profile_id(self, profile_id):
+    async def get_templates_by_profile_id(self, profile_id):
         """Get all templates by profile id"""
-        templates = self.get(req=None, lookup=None)
+        cursor = await self.get_async(req=None, lookup=None)
+        templates = await cursor.to_list()
         return [t for t in templates if str(t.get("data", {}).get("profile", "")) == str(profile_id)]
 
-    def update_template_profile(self, updates, profile_id, templates=None):
+    async def update_template_profile(self, updates, profile_id, templates=None):
         """
         Finds the templates that are referencing the given
         content profile an clears the disabled fields
@@ -314,12 +323,12 @@ class ContentTemplatesService(BaseService):
         :param templates: list of templates to process
         """
         if not templates:
-            templates = list(self.get_templates_by_profile_id(profile_id))
+            templates = await self.get_templates_by_profile_id(profile_id)
 
         for template in templates:
             data, processed = self._reset_fields(template, updates)
             if processed:
-                self.patch(template.get(config.ID_FIELD), {"data": data})
+                await self.patch_async(template.get(ID_FIELD), {"data": data})
 
     def _reset_fields(self, template, profile_data):
         """
@@ -368,14 +377,14 @@ class ContentTemplatesService(BaseService):
 
         return data, processed
 
-    def get_template_by_name(self, template_name):
+    async def get_template_by_name(self, template_name):
         """Get the template by name
 
         :param str template_name: template name
         :return dict: template
         """
         query = {"template_name": re.compile("^{}$".format(template_name), re.IGNORECASE)}
-        return self.find_one(req=None, **query)
+        return await self.find_one_async(req=None, **query)
 
     def _validate_kill_template(self, doc):
         """
@@ -421,7 +430,7 @@ class ContentTemplatesService(BaseService):
                 doc[key] = None
 
     def _validate_privileges(self, doc, action=None):
-        active_user = g.get("user")
+        active_user = get_current_app().get_current_user_dict() or {}
         user = doc.get("user")
         privileges = active_user.get("active_privileges", {}) if active_user else {}
         if (active_user and active_user.get("user_type")) == "administrator":
@@ -430,7 +439,7 @@ class ContentTemplatesService(BaseService):
             active_user
             and user
             and not doc.get("is_public")
-            and active_user.get(config.ID_FIELD) != doc.get("user")
+            and active_user.get(ID_FIELD) != doc.get("user")
             and not privileges.get("personal_template")
         ):
             raise SuperdeskApiError.badRequestError(
@@ -460,12 +469,13 @@ class ContentTemplatesApplyResource(Resource):
     url = "content_templates_apply"
 
 
-class ContentTemplatesApplyService(Service):
-    def create(self, docs, **kwargs):
+class ContentTemplatesApplyService(AsyncBaseService):
+    async def on_create_async(self, docs: list[dict]) -> None:
+        # Populate the item from template in ``on_create`` as we need async code
         doc = docs[0] if len(docs) > 0 else {}
         template_name = doc.get("template_name")
         item = doc.get("item") or {}
-        item["desk_name"] = get_resource_service("desks").get_desk_name(item.get("task", {}).get("desk"))
+        item["desk_name"] = await DesksResourceModel.get_desk_name(item.get("task", {}).get("desk"))
 
         if not template_name:
             SuperdeskApiError.badRequestError(message="Invalid Template Name")
@@ -473,11 +483,11 @@ class ContentTemplatesApplyService(Service):
         if not item:
             SuperdeskApiError.badRequestError(message="Invalid Item")
 
-        template = superdesk.get_resource_service("content_templates").get_template_by_name(template_name)
+        template = await superdesk.get_resource_service("content_templates").get_template_by_name(template_name)
         if not template:
             SuperdeskApiError.badRequestError(message="Invalid Template")
 
-        updates = render_content_template(item, template)
+        updates = await render_content_template(item, template)
         item.update(updates)
 
         editor_utils.generate_fields(item, reload=True)
@@ -485,12 +495,15 @@ class ContentTemplatesApplyService(Service):
         if template_name == "kill":
             apply_null_override_for_kill(item)
 
+    async def create_async(self, docs: list[dict], **kwargs) -> list:
+        doc = docs[0] if len(docs) > 0 else {}
+        item = doc.get("item") or {}
         docs[0] = item
         build_custom_hateoas(CUSTOM_HATEOAS, docs[0])
-        return [docs[0].get(config.ID_FIELD)]
+        return [docs[0].get(ID_FIELD)]
 
 
-def render_content_template_by_name(item, template_name):
+async def render_content_template_by_name(item, template_name):
     """Apply template by name.
 
     :param dict item: item on which template is applied
@@ -498,15 +511,15 @@ def render_content_template_by_name(item, template_name):
     :return dict: updates to the item
     """
     # get the kill template
-    template = superdesk.get_resource_service("content_templates").get_template_by_name(template_name)
+    template = await superdesk.get_resource_service("content_templates").get_template_by_name(template_name)
     if not template:
         SuperdeskApiError.badRequestError(message="{} Template missing.".format(template_name))
 
     # apply the kill template
-    return render_content_template(item, template)
+    return await render_content_template(item, template)
 
 
-def render_content_template_by_id(item, template_id, update=False):
+async def render_content_template_by_id(item, template_id, update=False):
     """Apply template by name.
 
     :param dict item: item on which template is applied
@@ -515,14 +528,14 @@ def render_content_template_by_id(item, template_id, update=False):
     :return dict: updates to the item
     """
     # get the kill template
-    template = superdesk.get_resource_service("content_templates").find_one(req=None, _id=template_id)
+    template = await superdesk.get_resource_service("content_templates").find_one_async(req=None, _id=template_id)
     if not template:
         SuperdeskApiError.badRequestError(message="{} Template missing.".format(template_id))
 
-    return render_content_template(item, template, update)
+    return await render_content_template(item, template, update)
 
 
-def render_content_template(item, template, update=False):
+async def render_content_template(item, template, update=False):
     """Render the template.
 
     :param dict item: item on which template is applied
@@ -540,19 +553,19 @@ def render_content_template(item, template, update=False):
 
     template_data = template.get("data", {}) if template else {}
 
-    def render_content_template_fields(data, dest=None, top=True):
+    async def render_content_template_fields(data, dest=None, top=True):
         updates = {}
         for key, value in data.items():
             if (top and key in new_template_data_ignore_fields) or not value:
                 continue
 
             if top and key == "extra":
-                updates[key] = render_content_template_fields(value, top=False)
+                updates[key] = await render_content_template_fields(value, top=False)
                 if update:
                     item.setdefault(key, {}).update(updates[key])
             elif isinstance(value, str):
                 try:
-                    updates[key] = render_template_string(value, **kwargs)
+                    updates[key] = await render_template_string(value, **kwargs)
                 except jinja2.exceptions.UndefinedError as err:
                     logger.error(err, extra=dict(field=key, template=value))
                 except jinja2.exceptions.TemplateSyntaxError as err:
@@ -574,19 +587,19 @@ def render_content_template(item, template, update=False):
                     item[key] = value
         return updates
 
-    return render_content_template_fields(template_data, dest=item)
+    return await render_content_template_fields(template_data, dest=item)
 
 
-def get_scheduled_templates(now):
+async def get_scheduled_templates(now):
     """Get templates that should be used to create items for given time.
 
     :param datetime now
     :return Cursor
     """
-    return superdesk.get_resource_service("content_templates").get_scheduled_templates(now)
+    return await superdesk.get_resource_service("content_templates").get_scheduled_templates(now)
 
 
-def set_template_timestamps(template, now):
+async def set_template_timestamps(template, now):
     """Update template `next_run` field to next time it should run.
 
     :param dict template
@@ -597,7 +610,7 @@ def set_template_timestamps(template, now):
         "next_run": get_next_run(template.get("schedule"), now),
     }
     service = superdesk.get_resource_service("content_templates")
-    service.update(template[config.ID_FIELD], updates, template)
+    await service.update_async(template[ID_FIELD], updates, template)
 
 
 def get_item_from_template(template):
@@ -636,13 +649,13 @@ def filter_plaintext_fields(item):
 
 
 def apply_null_override_for_kill(item):
-    for key in app.config["KILL_TEMPLATE_NULL_FIELDS"]:
+    for key in get_app_config("KILL_TEMPLATE_NULL_FIELDS"):
         if key in item:
             item[key] = None
 
 
 @celery.task(soft_time_limit=120)
-def create_scheduled_content(now=None):
+async def create_scheduled_content(now=None):
     lock_name = get_lock_id("Template", "Schedule")
     if not lock(lock_name, expire=130):
         logger.info("Task: {} is already running.".format(lock_name))
@@ -651,17 +664,17 @@ def create_scheduled_content(now=None):
     try:
         if now is None:
             now = utcnow()
-        templates = get_scheduled_templates(now)
+        templates = await get_scheduled_templates(now)
         production = superdesk.get_resource_service(ARCHIVE)
         items = []
-        for template in templates:
-            set_template_timestamps(template, now)
+        async for template in templates:
+            await set_template_timestamps(template, now)
             item = get_item_from_template(template)
-            item[config.VERSION] = 1
-            production.post([item])
-            insert_into_versions(doc=item)
+            item[VERSION] = 1
+            await production.post_async([item])
+            await insert_into_versions_async(doc=item)
             try:
-                apply_onstage_rule(item, item.get(config.ID_FIELD))
+                await apply_onstage_rule(item, item.get(ID_FIELD))
             except Exception as ex:  # noqa
                 logger.exception("Failed to apply on stage rule while scheduling template.")
             items.append(item)
@@ -672,7 +685,7 @@ def create_scheduled_content(now=None):
         unlock(lock_name)
 
 
-def create_template_for_profile(items):
+async def create_template_for_profile(items):
     """Create templates based on given profiles.
 
     Each template should have same name like profile.
@@ -686,21 +699,26 @@ def create_template_for_profile(items):
                 {
                     "template_name": profile.get("label"),
                     "is_public": True,
-                    "data": {"profile": str(profile.get(config.ID_FIELD))},
+                    "data": {"profile": str(profile.get(ID_FIELD))},
                 }
             )
     if templates:
-        superdesk.get_resource_service(CONTENT_TEMPLATE_RESOURCE).post(templates)
+        await superdesk.get_resource_service(CONTENT_TEMPLATE_RESOURCE).post_async(templates)
 
 
-def remove_profile_from_templates(item):
+async def create_template_for_content_type(item: ContentTypesResourceModel) -> None:
+    await create_template_for_profile([item.to_dict()])
+
+
+async def remove_profile_from_templates(item):
     """Removes the profile data from templates that are using the profile
 
     :param item: deleted content profile
     """
-    templates = list(
-        superdesk.get_resource_service(CONTENT_TEMPLATE_RESOURCE).get_templates_by_profile_id(item.get(config.ID_FIELD))
+    templates = await superdesk.get_resource_service(CONTENT_TEMPLATE_RESOURCE).get_templates_by_profile_id(
+        item.get(ID_FIELD)
     )
+
     for template in templates:
         template.get("data", {}).pop("profile", None)
-        superdesk.get_resource_service(CONTENT_TEMPLATE_RESOURCE).patch(template[config.ID_FIELD], template)
+        await superdesk.get_resource_service(CONTENT_TEMPLATE_RESOURCE).patch_async(template[ID_FIELD], template)

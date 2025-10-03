@@ -14,13 +14,8 @@ LONG_DESCRIPTION = "Superdesk Server Core"
 
 install_requires = [
     "urllib3>=1.26,<3",
-    "eve>=1.1.2,<=2.2.1",
-    "eve-elastic>=7.4.0,<7.5.0",
-    "elasticsearch<7.18",  # we are using oss version on test server
-    "flask>=1.1,<1.2",
+    "elasticsearch[async]<7.18",  # we are using oss version on test server
     "flask-mail>=0.9,<0.11",
-    "flask-script>=2.0.5,<3.0",
-    "flask-babel>=1.0,<4.1",
     "arrow>=0.4,<=1.3.0",
     "pillow>=9.2,<11.3",
     "bcrypt>=3.1.1,<4.4",
@@ -35,8 +30,8 @@ install_requires = [
     "python-magic>=0.4,<0.5",
     "ldap3>=2.2.4,<2.10",
     "pytz>=2021.3",
-    "tzlocal>=2.1,<3.0",
-    "sentry-sdk[flask]>=2.0.0,<3.0.0",  # Replacing raven[flask]>=5.10,<7.0
+    "tzlocal>=5.2",
+    "sentry-sdk[quart]>=2.11,<3.0",
     "requests>=2.7.0,<3.0",
     "boto3>=1.26,<2.0",
     "websockets>=14.2,<16",
@@ -45,7 +40,7 @@ install_requires = [
     "lxml_html_clean>=0.1.1,<0.5",
     "python-twitter>=3.5,<3.6",
     "chardet<6.0",
-    "pymongo>=3.8,<3.12",
+    "pymongo>=4.9.1,<4.10",
     "croniter<6.1",
     "python-dateutil<2.10",
     "unidecode>=0.04.21,<=1.4.0",
@@ -55,16 +50,24 @@ install_requires = [
     "flask-oidc-ex>=0.5.5,<0.7",
     "elastic-apm[flask]>=6.15.1,<7.0",
     # Fix an issue with MarkupSafe 2.1.0 not exporting `soft_unicode`
-    "MarkupSafe<2.1",
+    "MarkupSafe>2.1",
     "reportlab>=3.6.11,<4.5",
     "pyjwt>=2.4.0,<2.11",
-    "Werkzeug>=1.0,<1.1",
-    "Jinja2>=2.11,<3.0",
-    "Click>=8.0.3,<9.0",
-    "itsdangerous>=1.1,<2.0",
     "pymemcache>=4.0,<4.1",
     "xmlsec>=1.3.13,<1.3.15",
-    "mongolock @ git+https://github.com/superdesk/mongolock.git@v1",
+    # Async libraries
+    "motor>=3.4.0,<4.0",
+    "pydantic>=2.7.4,<3.0",
+    # Custom repos, with patches applied
+    "eve @ git+https://github.com/superdesk/eve@async",
+    "eve-elastic @ git+https://github.com/superdesk/eve-elastic@async",
+    "quart @ git+https://github.com/MarkLark86/quart@fix-test-client-with-utf8-url",
+    "quart_babel>=1.0.7,<1.1",
+    "asgiref>=3.8.1",
+    "aioboto3>=14.1.0,<15",
+    # Patch Quart, Asyncio to work with Flask extensions
+    # TODO-ASYNC: Remove this with our own flask patch (as quart-flask-patch also patches asyncio)
+    "quart-flask-patch>=0.3.0,<0.4",
 ]
 
 package_data = {
@@ -87,7 +90,7 @@ package_data = {
 
 setup(
     name="Superdesk-Core",
-    version="2.10.0",
+    version="3.2.0-dev.0",
     description="Superdesk Core library",
     long_description=LONG_DESCRIPTION,
     author="petr jasek",
@@ -103,7 +106,7 @@ setup(
     extras_require={
         "exiv2": ["pyexiv2>=2.12.0,<2.16"],
     },
-    python_requires=">=3.9",
+    python_requires=">=3.10",
     classifiers=[
         "Development Status :: 4 - Beta",
         "Environment :: Web Environment",

@@ -9,15 +9,16 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 import json
-import superdesk
+from typing import Any
 
 from superdesk.publish.formatters import Formatter
 from superdesk.metadata.item import ITEM_TYPE, CONTENT_TYPE, FORMAT, FORMATS
-from flask import render_template
 from copy import deepcopy
+from superdesk.flask import render_template
 from superdesk.errors import FormatterError
 from superdesk import etree as sd_etree
 from superdesk.editor_utils import remove_all_embeds
+from superdesk.publish_async.utils import generate_sequence_number
 
 
 class EmailFormatter(Formatter):
@@ -54,28 +55,28 @@ class EmailFormatter(Formatter):
             ptag.text = formatted_article["dateline"]["text"] + " " + (ptag.text or "")
             formatted_article["body_html"] = sd_etree.to_string(body_html_elem)
 
-    def format(self, article, subscriber, codes=None):
+    async def format(self, article: dict, subscriber: dict | None, codes: list | None = None) -> list[tuple[int, str] | dict]:  # type: ignore
         formatted_article = deepcopy(article)
         remove_all_embeds(formatted_article)
-        pub_seq_num = superdesk.get_resource_service("subscribers").generate_sequence_number(subscriber)
-        doc = {}
+        pub_seq_num = await generate_sequence_number(subscriber)
+        doc: dict[str, Any] = {}
         try:
             if formatted_article.get(FORMAT) == FORMATS.HTML:
                 if formatted_article.get("dateline", {}).get("text"):
                     # If there is a dateline inject it into the body
                     self._inject_dateline(formatted_article)
-                doc["message_html"] = render_template("email_article_body.html", article=formatted_article).replace(
-                    "</p>", "</p>\r"
-                )
+                doc["message_html"] = (
+                    await render_template("email_article_body.html", article=formatted_article)
+                ).replace("</p>", "</p>\r")
             else:
                 doc["message_html"] = None
-            doc["message_text"] = render_template("email_article_body.txt", article=formatted_article)
-            doc["message_subject"] = render_template("email_article_subject.txt", article=formatted_article)
+            doc["message_text"] = await render_template("email_article_body.txt", article=formatted_article)
+            doc["message_subject"] = await render_template("email_article_subject.txt", article=formatted_article)
             doc["renditions"] = ((formatted_article.get("associations", {}) or {}).get("featuremedia", {}) or {}).get(
                 "renditions"
             )
         except Exception as ex:
-            raise FormatterError.EmailFormatterError(ex, FormatterError)
+            raise await FormatterError.EmailFormatterError(ex, FormatterError).send_notifications()
         return [(pub_seq_num, json.dumps(doc))]
 
     def can_format(self, format_type, article):

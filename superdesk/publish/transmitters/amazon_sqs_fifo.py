@@ -48,7 +48,7 @@ class AmazonSQSFIFOPublishService(publish_service.PublishService):
 
         return {}
 
-    def _send_to_sqs(self, config, message_body, destination):
+    async def _send_to_sqs(self, config, message_body, destination):
         try:
             sqs = boto3.resource(
                 "sqs",
@@ -65,25 +65,25 @@ class AmazonSQSFIFOPublishService(publish_service.PublishService):
         except NoCredentialsError:
             raise
         except (EndpointConnectionError, ConnectionClosedError, NewConnectionError) as error:
-            raise PublishAmazonSQSError.connectionError(error, destination)
+            raise await PublishAmazonSQSError.connectionError(error, destination).send_notifications()
         except ClientError as error:
-            raise PublishAmazonSQSError.clientError(error, destination)
+            raise await PublishAmazonSQSError.clientError(error, destination).send_notifications()
         except Exception as error:
-            raise PublishAmazonSQSError.sendMessageError(error, destination)
+            raise await PublishAmazonSQSError.sendMessageError(error, destination).send_notifications()
 
-    def _transmit(self, queue_item, subscriber):
+    async def _transmit(self, queue_item, subscriber):
         destination = queue_item.get("destination") or {}
         config = destination.get("config") or {}
         message_body = queue_item["formatted_item"]
 
         try:
-            return self._send_to_sqs(config, message_body, destination)
+            return await self._send_to_sqs(config, message_body, destination)
         except NoCredentialsError:
             # Retry using the matching destination's config from the subscriber
             subscriber_destination = self._find_matching_destination(subscriber, destination) or {}
             fallback_config = subscriber_destination.get("config") or {}
             try:
-                return self._send_to_sqs(fallback_config, message_body, destination)
+                return await self._send_to_sqs(fallback_config, message_body, destination)
             except NoCredentialsError as error:
                 raise PublishAmazonSQSError.credentialsError(error, destination)
 

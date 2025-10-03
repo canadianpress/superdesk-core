@@ -11,10 +11,8 @@
 import datetime
 import lxml.etree as etree
 
-from unittest import mock
-
 from apps.publish import init_app
-from superdesk.tests import TestCase
+from superdesk.tests import TestCase, fixtures
 from superdesk.utc import utcnow
 from superdesk.publish.formatters import NewsMLG2Formatter
 
@@ -32,7 +30,6 @@ def ns(key):
     return "/".join(["{http://iptc.org/std/nar/2006-10-01/}%s" % token for token in tokens])
 
 
-@mock.patch("superdesk.publish.subscribers.SubscribersService.generate_sequence_number", lambda self, subscriber: 1)
 class NewsMLG2FormatterTest(TestCase):
     embargo_ts = utcnow() + datetime.timedelta(days=2)
     article = {
@@ -557,7 +554,8 @@ class NewsMLG2FormatterTest(TestCase):
 
     now = datetime.datetime(2015, 6, 13, 11, 45, 19, 0)
 
-    def setUp(self):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
         self.article["state"] = "published"
         self.article["firstcreated"] = self.now
         self.article["versioncreated"] = self.now
@@ -568,9 +566,10 @@ class NewsMLG2FormatterTest(TestCase):
         init_app(self.app)
         self.app.data.insert("vocabularies", self.vocab)
         self.app.data.insert("archive", self.packaged_articles)
+        self.subscriber = fixtures.subscribers.sub1_subscriber().to_dict()
 
-    def test_formatter(self):
-        seq, doc = self.formatter.format(self.article, {"name": "Test Subscriber"})[0]
+    async def test_formatter(self):
+        seq, doc = (await self.formatter.format(self.article, self.subscriber))[0]
         xml = etree.fromstring(doc.encode("utf-8"))
         content_meta = xml.find(ns("itemSet")).find(ns("newsItem")).find(ns("contentMeta"))
         self.assertEqual(
@@ -690,10 +689,10 @@ class NewsMLG2FormatterTest(TestCase):
         self.assertEqual("Article (News)", genre[0].find(ns("name")).text)
         self.assertEqual("custom:foo", genre[1].get("qcode"))
 
-    def testPreservedFomat(self):
+    async def testPreservedFomat(self):
         article = dict(self.article)
         article["format"] = "preserved"
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         xml = etree.fromstring(doc.encode("utf-8"))
         self.assertEqual(
             xml.find(
@@ -703,10 +702,10 @@ class NewsMLG2FormatterTest(TestCase):
             "The story body",
         )
 
-    def testDefaultRightsFomatter(self):
+    async def testDefaultRightsFomatter(self):
         article = dict(self.article)
         article["source"] = "BOGUS"
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         xml = etree.fromstring(doc.encode("utf-8"))
         self.assertEqual(
             xml.find(
@@ -716,11 +715,11 @@ class NewsMLG2FormatterTest(TestCase):
             "default terms",
         )
 
-    def testPackagePublish(self):
+    async def testPackagePublish(self):
         article = dict(self.package)
         article["firstcreated"] = self.now
         article["versioncreated"] = self.now
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         xml = etree.fromstring(doc.encode("utf-8"))
         self.assertEqual(
             xml.find("{http://iptc.org/std/nar/2006-10-01/}header/{http://iptc.org/std/nar/2006-10-01/}priority").text,
@@ -736,11 +735,11 @@ class NewsMLG2FormatterTest(TestCase):
             "tag:localhost:2015:5838657b-b3ec-4e5a-9b39-36039e16400b",
         )
 
-    def testPicturePackagePublish(self):
+    async def testPicturePackagePublish(self):
         article = dict(self.picture_package)
         article["firstcreated"] = self.now
         article["versioncreated"] = self.now
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         xml = etree.fromstring(doc.encode("utf-8"))
         self.assertEqual(
             xml.find("{http://iptc.org/std/nar/2006-10-01/}header/{http://iptc.org/std/nar/2006-10-01/}priority").text,
@@ -763,11 +762,11 @@ class NewsMLG2FormatterTest(TestCase):
             "tag:localhost:2015:0c12aa0a-82ef-4c58-a363-c5bd8a368037",
         )
 
-    def testPicturePublish(self):
+    async def testPicturePublish(self):
         article = dict(self.picture)
         article["firstcreated"] = self.now
         article["versioncreated"] = self.now
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         xml = etree.fromstring(doc.encode("utf-8"))
         self.assertEqual(
             xml.find("{http://iptc.org/std/nar/2006-10-01/}header/{http://iptc.org/std/nar/2006-10-01/}priority").text,
@@ -806,11 +805,11 @@ class NewsMLG2FormatterTest(TestCase):
             "image/jpeg",
         )
 
-    def testVideoPublish(self):
+    async def testVideoPublish(self):
         article = dict(self.video)
         article["firstcreated"] = self.now
         article["versioncreated"] = self.now
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         xml = etree.fromstring(doc.encode("utf-8"))
         self.assertEqual(
             xml.find("{http://iptc.org/std/nar/2006-10-01/}header/{http://iptc.org/std/nar/2006-10-01/}priority").text,
@@ -857,11 +856,11 @@ class NewsMLG2FormatterTest(TestCase):
             "video/mp4",
         )
 
-    def testPictureTextPackage(self):
+    async def testPictureTextPackage(self):
         article = dict(self.picture_text_package)
         article["firstcreated"] = self.now
         article["versioncreated"] = self.now
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         xml = etree.fromstring(doc.encode("utf-8"))
         item_refs = xml.findall(".//{http://iptc.org/std/nar/2006-10-01/}itemRef")
         self.assertEqual(len(item_refs), 2)
@@ -878,11 +877,11 @@ class NewsMLG2FormatterTest(TestCase):
             item_refs[1].find("{http://iptc.org/std/nar/2006-10-01/}pubStatus").get("qcode"), "stat:usable"
         )
 
-    def testPictureTextPackageMultiGroup(self):
+    async def testPictureTextPackageMultiGroup(self):
         article = dict(self.picture_text_package_multi_group)
         article["firstcreated"] = self.now
         article["versioncreated"] = self.now
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         xml = etree.fromstring(doc.encode("utf-8"))
         item_refs = xml.findall(".//{http://iptc.org/std/nar/2006-10-01/}itemRef")
         self.assertEqual(len(item_refs), 2)
@@ -912,9 +911,9 @@ class NewsMLG2FormatterTest(TestCase):
         self.assertEqual(group_ref[0].get("idref"), "main")
         self.assertEqual(group_ref[1].get("idref"), "picture")
 
-    def testPlace(self):
+    async def testPlace(self):
         article = self.article.copy()
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         xml = etree.fromstring(doc.encode("utf-8"))
         content_meta = xml.find(
             "{http://iptc.org/std/nar/2006-10-01/}itemSet"
@@ -943,7 +942,7 @@ class NewsMLG2FormatterTest(TestCase):
                 "world_region": "Oceania",
             }
         ]
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         xml = etree.fromstring(doc.encode("utf-8"))
         content_meta = xml.find(
             "{http://iptc.org/std/nar/2006-10-01/}itemSet"
@@ -970,7 +969,7 @@ class NewsMLG2FormatterTest(TestCase):
         )
 
         article["place"] = [{"name": "EUR", "qcode": "EUR", "state": "", "country": "", "world_region": "Europe"}]
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         xml = etree.fromstring(doc.encode("utf-8"))
         content_meta = xml.find(
             "{http://iptc.org/std/nar/2006-10-01/}itemSet"
@@ -984,7 +983,7 @@ class NewsMLG2FormatterTest(TestCase):
         )
         self.assertIsNone(content_meta.find("{http://iptc.org/std/nar/2006-10-01/}" 'subject[@qcode="loctyp:Country"]'))
 
-    def testPlaceGeonames(self):
+    async def testPlaceGeonames(self):
         article = self.article.copy()
         article["place"] = [
             {
@@ -1031,7 +1030,7 @@ class NewsMLG2FormatterTest(TestCase):
             },
         ]
 
-        _, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        _, doc = (await self.formatter.format(article, self.subscriber))[0]
         xml = etree.fromstring(doc.encode("utf-8"))
         content_meta = xml.find(ns("itemSet")).find(ns("newsItem")).find(ns("contentMeta"))
 
@@ -1076,16 +1075,16 @@ class NewsMLG2FormatterTest(TestCase):
         broader = country.findall(ns("broader"))
         self.assertEqual(0, len(broader))
 
-    def format(self, updates=None):
+    async def format(self, updates=None):
         article = self.article.copy()
         article.update(updates)
-        _, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        _, doc = (await self.formatter.format(article, self.subscriber))[0]
         root = etree.fromstring(doc.encode("utf-8"))
         item = root.find("itemSet", NSMAP).find("newsItem", NSMAP)
         return item
 
-    def test_lang_fr(self):
-        item = self.format(
+    async def test_lang_fr(self):
+        item = await self.format(
             {
                 "language": "fr-CA",
                 "subject": [
@@ -1140,8 +1139,8 @@ class NewsMLG2FormatterTest(TestCase):
         self.assertEqual("gen fr", genre.find("name", NSMAP).text)
         self.assertEqual("fr", genre.find("name", NSMAP).attrib[XML_LANG])
 
-    def test_null_anpa_category(self):
-        item = self.format(
+    async def test_null_anpa_category(self):
+        item = await self.format(
             {
                 "headline": "foo",
                 "anpa_category": None,

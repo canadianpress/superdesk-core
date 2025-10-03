@@ -13,23 +13,45 @@ import re
 import os
 from datetime import timedelta
 
+from bson import ObjectId
 from eve.utils import ParsedRequest
+
+from superdesk.types import (
+    ContentFiltersResource,
+    SubscribersResource,
+    FilterConditionsResource,
+    FilterConditionOperator,
+    ProductsResource,
+)
+
 from apps.content_filters.filter_condition.filter_condition_field import FilterConditionDeskField
 
 from superdesk.utc import utcnow
 from superdesk import get_resource_service
 from superdesk.tests import TestCase
-from apps.content_filters.filter_condition.filter_condition_service import FilterConditionService
 from apps.content_filters.filter_condition.filter_condition import FilterCondition
-from apps.content_filters.filter_condition.filter_condition_operator import FilterConditionOperator
+from apps.content_filters.filter_condition.filter_condition_operator import FilterConditionOperator as OperatorFactory
 from apps.content_filters.filter_condition.filter_condition_value import FilterConditionValue
 from apps.prepopulate.app_populate import AppPopulateCommand
 
+from superdesk.publish_async.utils import check_similar_filter_conditions
+
+
+FILTER_CONDITION_IDS = [ObjectId(), ObjectId(), ObjectId(), ObjectId(), ObjectId()]
+CONTENT_FILTER_ID = ObjectId()
+
 
 class FilterConditionTests(TestCase):
-    def setUp(self):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+
+        self.filter_conditions_service = FilterConditionsResource.get_service()
+        self.content_filters_service = ContentFiltersResource.get_service()
+        self.products_service = ProductsResource.get_service()
+        self.subscribers_service = SubscribersResource.get_service()
+
         self.req = ParsedRequest()
-        with self.app.test_request_context(self.app.config.get("URL_PREFIX")):
+        async with self.app.test_request_context(self.app.config.get("URL_PREFIX")):
             self.articles = [
                 {"_id": "1", "urgency": 1, "headline": "story", "state": "fetched", "task": {"desk": 1}},
                 {"_id": "2", "headline": "prtorque", "state": "fetched", "task": {"desk": 1}},
@@ -89,27 +111,54 @@ class FilterConditionTests(TestCase):
 
             self.app.data.insert("archive", self.articles)
 
-            self.app.data.insert(
-                "filter_conditions",
-                [{"_id": 1, "field": "headline", "operator": "like", "value": "tor", "name": "test-1"}],
+            await self.filter_conditions_service.create(
+                [
+                    {
+                        "_id": FILTER_CONDITION_IDS[0],
+                        "field": "headline",
+                        "operator": "like",
+                        "value": "tor",
+                        "name": "test-1",
+                    },
+                    {
+                        "_id": FILTER_CONDITION_IDS[1],
+                        "field": "urgency",
+                        "operator": "in",
+                        "value": "2",
+                        "name": "test-2",
+                    },
+                    {
+                        "_id": FILTER_CONDITION_IDS[2],
+                        "field": "urgency",
+                        "operator": "in",
+                        "value": "3,4,5",
+                        "name": "test-3",
+                    },
+                    {
+                        "_id": FILTER_CONDITION_IDS[3],
+                        "field": "urgency",
+                        "operator": "nin",
+                        "value": "1,2,3",
+                        "name": "test-4",
+                    },
+                    {
+                        "_id": FILTER_CONDITION_IDS[4],
+                        "field": "urgency",
+                        "operator": "in",
+                        "value": "2,5",
+                        "name": "test-5",
+                    },
+                ]
             )
-            self.app.data.insert(
-                "filter_conditions", [{"_id": 2, "field": "urgency", "operator": "in", "value": "2", "name": "test-2"}]
-            )
-            self.app.data.insert(
-                "filter_conditions",
-                [{"_id": 3, "field": "urgency", "operator": "in", "value": "3,4,5", "name": "test-3"}],
-            )
-            self.app.data.insert(
-                "filter_conditions",
-                [{"_id": 4, "field": "urgency", "operator": "nin", "value": "1,2,3", "name": "test-4"}],
-            )
-            self.app.data.insert(
-                "filter_conditions",
-                [{"_id": 5, "field": "urgency", "operator": "in", "value": "2,5", "name": "test-5"}],
-            )
-            self.app.data.insert(
-                "content_filters", [{"_id": 1, "content_filter": [{"expression": {"fc": [1]}}], "name": "soccer-only"}]
+
+            await self.content_filters_service.create(
+                [
+                    {
+                        "_id": CONTENT_FILTER_ID,
+                        "content_filter": [{"expression": {"fc": [FILTER_CONDITION_IDS[0]]}}],
+                        "name": "soccer-only",
+                    }
+                ]
             )
 
     def _setup_elastic_args(self, elastic_translation, search_type="filter"):
@@ -134,324 +183,289 @@ class FilterConditionTests(TestCase):
         elif search_type == "exists":
             self.req.args = {"source": json.dumps({"query": {"bool": {"must": [elastic_translation]}}})}
 
-    def test_mongo_using_genre_filter_complete_string(self):
+    async def test_mongo_using_genre_filter_complete_string(self):
         f = FilterCondition("genre", "in", "Sidebar")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("7", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("7", docs[0]["_id"])
 
-    def test_mongo_using_priority_compare_eq_filter(self):
+    async def test_mongo_using_priority_compare_eq_filter(self):
         f = FilterCondition("priority", "eq", "3")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("5", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("5", docs[0]["_id"])
 
-    def test_mongo_using_priority_compare_ne_filter(self):
+    async def test_mongo_using_priority_compare_ne_filter(self):
         f = FilterCondition("priority", "ne", "3")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(11, docs.count())
-            self.assertTrue("5" not in [d["_id"] for d in docs])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(11, docs.count())
+        self.assertTrue("5" not in [d["_id"] for d in docs])
 
-    def test_mongo_using_priority_compare_lte_filter(self):
+    async def test_mongo_using_priority_compare_lte_filter(self):
         f = FilterCondition("priority", "lte", "3")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("5", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("5", docs[0]["_id"])
 
-    def test_mongo_using_desk_filter_complete_string(self):
+    async def test_mongo_using_desk_filter_complete_string(self):
         f = FilterCondition("desk", "in", "1")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("4", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("4", docs[0]["_id"])
 
-    def test_mongo_using_desk_filter_nin(self):
+    async def test_mongo_using_desk_filter_nin(self):
         f = FilterCondition("desk", "nin", "1")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(11, docs.count())
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(11, docs.count())
 
-    def test_mongo_using_desk_filter_eq(self):
+    async def test_mongo_using_desk_filter_eq(self):
         f = FilterCondition("desk", "eq", "1")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("4", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("4", docs[0]["_id"])
 
-    def test_mongo_using_sms_filter_with_is(self):
+    async def test_mongo_using_sms_filter_with_is(self):
         f = FilterCondition("sms", "in", "true")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
 
-    def test_mongo_using_sms_filter_with_eq_comp(self):
+    async def test_mongo_using_sms_filter_with_eq_comp(self):
         f = FilterCondition("sms", "eq", "true")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
 
-    def test_mongo_using_embargo_filter_with_eq_comp(self):
+    async def test_mongo_using_embargo_filter_with_eq_comp(self):
         f = FilterCondition("embargo", "eq", "true")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
 
-    def test_mongo_using_desk_filter_in_list(self):
+    async def test_mongo_using_desk_filter_in_list(self):
         f = FilterCondition("desk", "in", "1,2")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(2, docs.count())
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(2, docs.count())
 
-    def test_mongo_using_category_filter_complete_string(self):
+    async def test_mongo_using_category_filter_complete_string(self):
         f = FilterCondition("anpa_category", "in", "a,i")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("9", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("9", docs[0]["_id"])
 
-    def test_mongo_using_subject_filter_complete_string(self):
+    async def test_mongo_using_subject_filter_complete_string(self):
         f = FilterCondition("subject", "in", "05005003")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("8", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("8", docs[0]["_id"])
 
-    def test_mongo_using_subject_filter_complete_string_eq(self):
+    async def test_mongo_using_subject_filter_complete_string_eq(self):
         f = FilterCondition("subject", "eq", "05005003")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("8", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("8", docs[0]["_id"])
 
-    def test_mongo_using_like_filter_complete_string(self):
+    async def test_mongo_using_like_filter_complete_string(self):
         f = FilterCondition("headline", "like", "story")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("1", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("1", docs[0]["_id"])
 
-    def test_mongo_using_like_filter_complete_string_eq(self):
+    async def test_mongo_using_like_filter_complete_string_eq(self):
         f = FilterCondition("headline", "like", "story")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("1", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("1", docs[0]["_id"])
 
-    def test_mongo_using_like_filter_partial_string(self):
+    async def test_mongo_using_like_filter_partial_string(self):
         f = FilterCondition("headline", "like", "tor")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            doc_ids = [d["_id"] for d in docs]
-            self.assertEqual(2, docs.count())
-            self.assertTrue("1" in doc_ids)
-            self.assertTrue("2" in doc_ids)
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        doc_ids = [d["_id"] for d in docs]
+        self.assertEqual(2, docs.count())
+        self.assertTrue("1" in doc_ids)
+        self.assertTrue("2" in doc_ids)
 
-    def test_mongo_using_startswith_filter(self):
+    async def test_mongo_using_startswith_filter(self):
         f = FilterCondition("headline", "startswith", "Sto")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("1", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("1", docs[0]["_id"])
 
-    def test_mongo_using_endswith_filter(self):
+    async def test_mongo_using_endswith_filter(self):
         f = FilterCondition("headline", "endswith", "Que")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("2", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("2", docs[0]["_id"])
 
-    def test_mongo_using_notlike_filter(self):
+    async def test_mongo_using_notlike_filter(self):
         f = FilterCondition("headline", "notlike", "Que")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(11, docs.count())
-            doc_ids = [d["_id"] for d in docs]
-            self.assertTrue("2" not in doc_ids)
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(11, docs.count())
+        doc_ids = [d["_id"] for d in docs]
+        self.assertTrue("2" not in doc_ids)
 
-    def test_mongo_using_in_filter(self):
+    async def test_mongo_using_in_filter(self):
         f = FilterCondition("urgency", "in", "3,4")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(2, docs.count())
-            self.assertEqual("3", docs[0]["_id"])
-            self.assertEqual("4", docs[1]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(2, docs.count())
+        self.assertEqual("3", docs[0]["_id"])
+        self.assertEqual("4", docs[1]["_id"])
 
-    def test_mongo_using_notin_filter(self):
+    async def test_mongo_using_notin_filter(self):
         f = FilterCondition("urgency", "nin", "2,3,4")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(9, docs.count())
-            doc_ids = [d["_id"] for d in docs]
-            self.assertTrue("1" in doc_ids)
-            self.assertTrue("2" in doc_ids)
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(9, docs.count())
+        doc_ids = [d["_id"] for d in docs]
+        self.assertTrue("1" in doc_ids)
+        self.assertTrue("2" in doc_ids)
 
-    def test_elastic_using_genre_filter_complete_string(self):
+    async def test_elastic_using_genre_filter_complete_string(self):
         f = FilterCondition("genre", "in", "Sidebar")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query)
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            doc_ids = [d["_id"] for d in docs]
-            self.assertEqual(1, docs.count())
-            self.assertTrue("7" in doc_ids)
+        self._setup_elastic_args(query)
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        doc_ids = [d["_id"] for d in docs]
+        self.assertEqual(1, docs.count())
+        self.assertTrue("7" in doc_ids)
 
-    def test_elastic_using_sms_filter(self):
+    async def test_elastic_using_sms_filter(self):
         f = FilterCondition("sms", "in", "true")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query)
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            doc_ids = [d["_id"] for d in docs]
-            self.assertEqual(1, docs.count())
-            self.assertTrue("3" in doc_ids)
+        self._setup_elastic_args(query)
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        doc_ids = [d["_id"] for d in docs]
+        self.assertEqual(1, docs.count())
+        self.assertTrue("3" in doc_ids)
 
-    def test_elastic_using_embargo_filter(self):
+    async def test_elastic_using_embargo_filter(self):
         f = FilterCondition("embargo", "eq", "true")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query)
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            doc_ids = [d["_id"] for d in docs]
-            self.assertEqual(1, docs.count())
-            self.assertTrue("6" in doc_ids)
+        self._setup_elastic_args(query)
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        doc_ids = [d["_id"] for d in docs]
+        self.assertEqual(1, docs.count())
+        self.assertTrue("6" in doc_ids)
 
-    def test_elastic_using_subject_filter_complete_string(self):
+    async def test_elastic_using_subject_filter_complete_string(self):
         f = FilterCondition("subject", "in", "05005003")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query)
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            doc_ids = [d["_id"] for d in docs]
-            self.assertEqual(1, docs.count())
-            self.assertTrue("8" in doc_ids)
+        self._setup_elastic_args(query)
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        doc_ids = [d["_id"] for d in docs]
+        self.assertEqual(1, docs.count())
+        self.assertTrue("8" in doc_ids)
 
-    def test_elastic_using_anpa_category_filter_complete_string(self):
+    async def test_elastic_using_anpa_category_filter_complete_string(self):
         f = FilterCondition("anpa_category", "in", "a,i")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query)
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            doc_ids = [d["_id"] for d in docs]
-            self.assertEqual(1, docs.count())
-            self.assertTrue("9" in doc_ids)
+        self._setup_elastic_args(query)
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        doc_ids = [d["_id"] for d in docs]
+        self.assertEqual(1, docs.count())
+        self.assertTrue("9" in doc_ids)
 
-    def test_elastic_using_in_filter(self):
+    async def test_elastic_using_in_filter(self):
         f = FilterCondition("urgency", "in", "3,4")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query)
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            doc_ids = [d["_id"] for d in docs]
-            self.assertEqual(2, docs.count())
-            self.assertTrue("4" in doc_ids)
-            self.assertTrue("3" in doc_ids)
+        self._setup_elastic_args(query)
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        doc_ids = [d["_id"] for d in docs]
+        self.assertEqual(2, docs.count())
+        self.assertTrue("4" in doc_ids)
+        self.assertTrue("3" in doc_ids)
 
-    def test_elastic_using_eq_filter(self):
+    async def test_elastic_using_eq_filter(self):
         f = FilterCondition("urgency", "eq", "3")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query)
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            doc_ids = [d["_id"] for d in docs]
-            self.assertEqual(1, docs.count())
-            self.assertTrue("3" in doc_ids)
+        self._setup_elastic_args(query)
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        doc_ids = [d["_id"] for d in docs]
+        self.assertEqual(1, docs.count())
+        self.assertTrue("3" in doc_ids)
 
-    def test_elastic_using_nin_filter(self):
+    async def test_elastic_using_nin_filter(self):
         f = FilterCondition("urgency", "nin", "3,4")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query, "not")
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            self.assertEqual(8, docs.count())
-            doc_ids = [d["_id"] for d in docs]
-            self.assertTrue("6" in doc_ids)
-            self.assertTrue("5" in doc_ids)
+        self._setup_elastic_args(query, "not")
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        self.assertEqual(8, docs.count())
+        doc_ids = [d["_id"] for d in docs]
+        self.assertTrue("6" in doc_ids)
+        self.assertTrue("5" in doc_ids)
 
-    def test_elastic_using_ne_filter(self):
+    async def test_elastic_using_ne_filter(self):
         f = FilterCondition("urgency", "ne", "4")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query, "not")
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            self.assertEqual(9, docs.count())
-            doc_ids = [d["_id"] for d in docs]
-            self.assertTrue("6" in doc_ids)
-            self.assertTrue("5" in doc_ids)
+        self._setup_elastic_args(query, "not")
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        self.assertEqual(9, docs.count())
+        doc_ids = [d["_id"] for d in docs]
+        self.assertTrue("6" in doc_ids)
+        self.assertTrue("5" in doc_ids)
 
-    def test_elastic_using_like_filter(self):
+    async def test_elastic_using_like_filter(self):
         f = FilterCondition("headline", "like", "Tor")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query, "keyword")
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            self.assertEqual(2, docs.count())
-            doc_ids = [d["_id"] for d in docs]
-            self.assertTrue("1" in doc_ids)
-            self.assertTrue("2" in doc_ids)
+        self._setup_elastic_args(query, "keyword")
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        self.assertEqual(2, docs.count())
+        doc_ids = [d["_id"] for d in docs]
+        self.assertTrue("1" in doc_ids)
+        self.assertTrue("2" in doc_ids)
 
-    def test_elastic_using_notlike_filter(self):
+    async def test_elastic_using_notlike_filter(self):
         f = FilterCondition("headline", "notlike", "que")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query, "not")
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            self.assertEqual(9, docs.count())
-            doc_ids = [d["_id"] for d in docs]
-            self.assertTrue("2" not in doc_ids)
+        self._setup_elastic_args(query, "not")
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        self.assertEqual(9, docs.count())
+        doc_ids = [d["_id"] for d in docs]
+        self.assertTrue("2" not in doc_ids)
 
-    def test_elastic_using_startswith_filter(self):
+    async def test_elastic_using_startswith_filter(self):
         f = FilterCondition("headline", "startswith", "Sto")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query, "keyword")
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("1", docs[0]["_id"])
+        self._setup_elastic_args(query, "keyword")
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("1", docs[0]["_id"])
 
-    def test_elastic_using_endswith_filter(self):
+    async def test_elastic_using_endswith_filter(self):
         f = FilterCondition("headline", "endswith", "Que")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query, "keyword")
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("2", docs[0]["_id"])
+        self._setup_elastic_args(query, "keyword")
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("2", docs[0]["_id"])
 
-    def test_get_mongo_operator(self):
-        self.assertEqual(FilterConditionOperator.factory("in").mongo_operator, "$in")
-        self.assertEqual(FilterConditionOperator.factory("nin").mongo_operator, "$nin")
-        self.assertEqual(FilterConditionOperator.factory("like").mongo_operator, "$regex")
-        self.assertEqual(FilterConditionOperator.factory("notlike").mongo_operator, "$not")
-        self.assertEqual(FilterConditionOperator.factory("startswith").mongo_operator, "$regex")
-        self.assertEqual(FilterConditionOperator.factory("endswith").mongo_operator, "$regex")
+    async def test_get_mongo_operator(self):
+        self.assertEqual(OperatorFactory.factory("in").mongo_operator, "$in")
+        self.assertEqual(OperatorFactory.factory("nin").mongo_operator, "$nin")
+        self.assertEqual(OperatorFactory.factory("like").mongo_operator, "$regex")
+        self.assertEqual(OperatorFactory.factory("notlike").mongo_operator, "$not")
+        self.assertEqual(OperatorFactory.factory("startswith").mongo_operator, "$regex")
+        self.assertEqual(OperatorFactory.factory("endswith").mongo_operator, "$regex")
 
-    def test_get_mongo_value(self):
+    async def test_get_mongo_value(self):
         f = FilterCondition("urgency", "in", "1,2")
         self.assertEqual(f.value.get_mongo_value(f.field), [1, 2])
 
@@ -470,7 +484,7 @@ class FilterConditionTests(TestCase):
         f = FilterCondition("headline", "endswith", "test")
         self.assertEqual(f.value.get_mongo_value(f.field), re.compile(".*test$", re.IGNORECASE))
 
-    def test_does_match_with_eq(self):
+    async def test_does_match_with_eq(self):
         f = FilterCondition("urgency", "eq", "1")
         self.assertTrue(f.does_match(self.articles[0]))
         self.assertFalse(f.does_match(self.articles[1]))
@@ -479,7 +493,7 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[4]))
         self.assertFalse(f.does_match(self.articles[5]))
 
-    def test_does_match_with_eq_string(self):
+    async def test_does_match_with_eq_string(self):
         f = FilterCondition("headline", "eq", "Story")
         self.assertTrue(f.does_match(self.articles[0]))
         self.assertFalse(f.does_match(self.articles[1]))
@@ -488,7 +502,7 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[4]))
         self.assertFalse(f.does_match(self.articles[5]))
 
-    def test_does_match_with_eq_bool(self):
+    async def test_does_match_with_eq_bool(self):
         f = FilterCondition("sms", "eq", "true")
         self.assertFalse(f.does_match(self.articles[0]))
         self.assertFalse(f.does_match(self.articles[1]))
@@ -499,7 +513,7 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[6]))
         self.assertFalse(f.does_match(self.articles[7]))
 
-    def test_does_match_with_lt_int(self):
+    async def test_does_match_with_lt_int(self):
         f = FilterCondition("priority", "lt", "7")
         self.assertFalse(f.does_match(self.articles[0]))
         self.assertFalse(f.does_match(self.articles[1]))
@@ -510,7 +524,7 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[6]))
         self.assertFalse(f.does_match(self.articles[7]))
 
-    def test_does_match_with_gt_int(self):
+    async def test_does_match_with_gt_int(self):
         f = FilterCondition("priority", "gt", "1")
         self.assertFalse(f.does_match(self.articles[0]))
         self.assertFalse(f.does_match(self.articles[1]))
@@ -521,7 +535,7 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[6]))
         self.assertFalse(f.does_match(self.articles[7]))
 
-    def test_does_match_with_gte_int(self):
+    async def test_does_match_with_gte_int(self):
         f = FilterCondition("priority", "gte", "3")
         self.assertFalse(f.does_match(self.articles[0]))
         self.assertFalse(f.does_match(self.articles[1]))
@@ -532,7 +546,7 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[6]))
         self.assertFalse(f.does_match(self.articles[7]))
 
-    def test_does_match_with_ne_int(self):
+    async def test_does_match_with_ne_int(self):
         f = FilterCondition("priority", "ne", "3")
         self.assertTrue(f.does_match(self.articles[0]))
         self.assertTrue(f.does_match(self.articles[1]))
@@ -543,7 +557,7 @@ class FilterConditionTests(TestCase):
         self.assertTrue(f.does_match(self.articles[6]))
         self.assertTrue(f.does_match(self.articles[7]))
 
-    def test_does_match_with_like_full(self):
+    async def test_does_match_with_like_full(self):
         f = FilterCondition("headline", "like", "story")
         self.assertTrue(f.does_match(self.articles[0]))
         self.assertFalse(f.does_match(self.articles[1]))
@@ -552,7 +566,7 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[4]))
         self.assertFalse(f.does_match(self.articles[5]))
 
-    def test_does_match_with_like_partial(self):
+    async def test_does_match_with_like_partial(self):
         f = FilterCondition("headline", "like", "tor")
         self.assertTrue(f.does_match(self.articles[0]))
         self.assertTrue(f.does_match(self.articles[1]))
@@ -561,7 +575,7 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[4]))
         self.assertFalse(f.does_match(self.articles[5]))
 
-    def test_does_match_with_like_complex(self):
+    async def test_does_match_with_like_complex(self):
         f = FilterCondition("headline", "like", "Foo|Bar|Baz|Test Multiword")
         self.assertTrue(f.does_match({"headline": "Bar"}))
         self.assertTrue(f.does_match({"headline": "Bar Something"}))
@@ -570,7 +584,7 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match({"headline": "Something Test"}))
         self.assertTrue(f.does_match({"headline": "Something Test Multiword"}))
 
-    def test_does_match_with_startswith_filter(self):
+    async def test_does_match_with_startswith_filter(self):
         f = FilterCondition("headline", "startswith", "Sto")
         self.assertTrue(f.does_match(self.articles[0]))
         self.assertFalse(f.does_match(self.articles[1]))
@@ -579,15 +593,15 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[4]))
         self.assertFalse(f.does_match(self.articles[5]))
 
-    def test_does_match_with_startswith_filter_html_field(self):
+    async def test_does_match_with_startswith_filter_html_field(self):
         f = FilterCondition("body_html", "startswith", "men")
         self.assertTrue(f.does_match(self.articles[9]))
 
-    def test_does_match_with_startswith_filter_html_field_with_fluff(self):
+    async def test_does_match_with_startswith_filter_html_field_with_fluff(self):
         f = FilterCondition("body_html", "startswith", "SDA")
         self.assertTrue(f.does_match(self.articles[11]))
 
-    def test_does_match_with_endswith_filter(self):
+    async def test_does_match_with_endswith_filter(self):
         f = FilterCondition("headline", "endswith", "Que")
         self.assertFalse(f.does_match(self.articles[0]))
         self.assertTrue(f.does_match(self.articles[1]))
@@ -596,7 +610,7 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[4]))
         self.assertFalse(f.does_match(self.articles[5]))
 
-    def test_does_match_with_notlike_filter(self):
+    async def test_does_match_with_notlike_filter(self):
         f = FilterCondition("headline", "notlike", "Que")
         self.assertTrue(f.does_match(self.articles[0]))
         self.assertFalse(f.does_match(self.articles[1]))
@@ -605,7 +619,7 @@ class FilterConditionTests(TestCase):
         self.assertTrue(f.does_match(self.articles[4]))
         self.assertTrue(f.does_match(self.articles[5]))
 
-    def test_does_match_with_genre_filter(self):
+    async def test_does_match_with_genre_filter(self):
         f = FilterCondition("genre", "in", "Sidebar")
         self.assertFalse(f.does_match(self.articles[0]))
         self.assertFalse(f.does_match(self.articles[1]))
@@ -622,7 +636,7 @@ class FilterConditionTests(TestCase):
             f.does_match({"genre": [{"name": "Sidebar", "qcode": "Sidebar"}, {"name": "Article", "qcode": "Article"}]})
         )
 
-    def test_does_match_with_category_filter(self):
+    async def test_does_match_with_category_filter(self):
         f = FilterCondition("anpa_category", "in", "a,i")
         self.assertFalse(f.does_match(self.articles[0]))
         self.assertFalse(f.does_match(self.articles[1]))
@@ -634,7 +648,7 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[7]))
         self.assertTrue(f.does_match(self.articles[8]))
 
-    def test_does_match_with_subject_filter(self):
+    async def test_does_match_with_subject_filter(self):
         f = FilterCondition("subject", "in", "05005003")
         self.assertFalse(f.does_match(self.articles[0]))
         self.assertFalse(f.does_match(self.articles[1]))
@@ -645,7 +659,7 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[6]))
         self.assertTrue(f.does_match(self.articles[7]))
 
-    def test_does_match_with_sms_filter(self):
+    async def test_does_match_with_sms_filter(self):
         f = FilterCondition("sms", "nin", "true")
         self.assertTrue(f.does_match(self.articles[0]))
         self.assertTrue(f.does_match(self.articles[1]))
@@ -656,7 +670,7 @@ class FilterConditionTests(TestCase):
         self.assertTrue(f.does_match(self.articles[6]))
         self.assertTrue(f.does_match(self.articles[7]))
 
-    def test_does_match_with_embargo_filter_with_false(self):
+    async def test_does_match_with_embargo_filter_with_false(self):
         f = FilterCondition("embargo", "eq", "false")
         self.assertTrue(f.does_match(self.articles[0]))
         self.assertTrue(f.does_match(self.articles[1]))
@@ -667,7 +681,7 @@ class FilterConditionTests(TestCase):
         self.assertTrue(f.does_match(self.articles[6]))
         self.assertTrue(f.does_match(self.articles[7]))
 
-    def test_does_match_with_embargo_filter_with_true(self):
+    async def test_does_match_with_embargo_filter_with_true(self):
         f = FilterCondition("embargo", "eq", "true")
         self.assertFalse(f.does_match(self.articles[0]))
         self.assertFalse(f.does_match(self.articles[1]))
@@ -678,7 +692,7 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[6]))
         self.assertFalse(f.does_match(self.articles[7]))
 
-    def test_does_match_with_in_filter(self):
+    async def test_does_match_with_in_filter(self):
         f = FilterCondition("urgency", "in", "3,4")
         self.assertFalse(f.does_match(self.articles[0]))
         self.assertFalse(f.does_match(self.articles[1]))
@@ -687,7 +701,7 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[4]))
         self.assertFalse(f.does_match(self.articles[5]))
 
-    def test_does_match_with_in_filter_case_insensitive(self):
+    async def test_does_match_with_in_filter_case_insensitive(self):
         f = FilterCondition("source", "in", "aap,reuters")
         self.assertTrue(f.does_match({"source": "AAP"}))
         self.assertTrue(f.does_match({"source": "aap"}))
@@ -697,7 +711,7 @@ class FilterConditionTests(TestCase):
         self.assertTrue(f.does_match({"source": "aap"}))
         self.assertFalse(f.does_match({"source": "REUTERS"}))
 
-    def test_does_match_with_nin_filter(self):
+    async def test_does_match_with_nin_filter(self):
         f = FilterCondition("urgency", "nin", "2,3,4")
         self.assertTrue(f.does_match(self.articles[0]))
         self.assertTrue(f.does_match(self.articles[1]))
@@ -706,113 +720,153 @@ class FilterConditionTests(TestCase):
         self.assertFalse(f.does_match(self.articles[4]))
         self.assertTrue(f.does_match(self.articles[5]))
 
-    def test_are_equal1(self):
-        f = FilterConditionService()
-        new_doc = {"name": "A", "field": "urgency", "operator": "nin", "value": "2,3,4"}
-        doc = {"_id": 1, "name": "B", "field": "urgency", "operator": "nin", "value": "2,3,4"}
-        self.assertTrue(f._are_equal(new_doc, doc))
+    async def test_are_equal1(self):
+        new_doc = FilterConditionsResource(
+            id=ObjectId(),
+            name="A",
+            field="urgency",
+            operator=FilterConditionOperator.NOT_IN,
+            value="2,3,4",
+        )
+        doc = FilterConditionsResource(
+            id=ObjectId(),
+            name="B",
+            field="urgency",
+            operator=FilterConditionOperator.NOT_IN,
+            value="2,3,4",
+        )
+        self.assertTrue(self.filter_conditions_service._are_equal(new_doc, doc))
 
-    def test_are_equal2(self):
-        f = FilterConditionService()
-        new_doc = {"name": "A", "field": "urgency", "operator": "nin", "value": "4,2,3"}
-        doc = {"_id": 1, "name": "B", "field": "urgency", "operator": "nin", "value": "2,3,4"}
-        self.assertTrue(f._are_equal(new_doc, doc))
+    async def test_are_equal2(self):
+        new_doc = FilterConditionsResource(
+            id=ObjectId(),
+            name="A",
+            field="urgency",
+            operator=FilterConditionOperator.NOT_IN,
+            value="4,2,3",
+        )
+        doc = FilterConditionsResource(
+            id=ObjectId(),
+            name="B",
+            field="urgency",
+            operator=FilterConditionOperator.NOT_IN,
+            value="2,3,4",
+        )
+        self.assertTrue(self.filter_conditions_service._are_equal(new_doc, doc))
 
-    def test_are_equal3(self):
-        f = FilterConditionService()
-        new_doc = {"name": "A", "field": "urgency", "operator": "nin", "value": "jump,track"}
-        doc = {"_id": 1, "name": "B", "field": "urgency", "operator": "nin", "value": "tump,jrack"}
-        self.assertTrue(f._are_equal(new_doc, doc))
+    async def test_are_equal3(self):
+        new_doc = FilterConditionsResource(
+            id=ObjectId(),
+            name="A",
+            field="urgency",
+            operator=FilterConditionOperator.NOT_IN,
+            value="jump,track",
+        )
+        doc = FilterConditionsResource(
+            id=ObjectId(),
+            name="B",
+            field="urgency",
+            operator=FilterConditionOperator.NOT_IN,
+            value="tump,jrack",
+        )
+        self.assertTrue(self.filter_conditions_service._are_equal(new_doc, doc))
 
-    def test_are_equal4(self):
-        f = FilterConditionService()
-        new_doc = {"name": "A", "field": "urgency", "operator": "nin", "value": "4,2,3"}
-        doc = {"_id": 1, "name": "B", "field": "urgency", "operator": "nin", "value": "2,3"}
-        self.assertFalse(f._are_equal(new_doc, doc))
+    async def test_are_equal4(self):
+        new_doc = FilterConditionsResource(
+            id=ObjectId(),
+            name="A",
+            field="urgency",
+            operator=FilterConditionOperator.NOT_IN,
+            value="4,2,3",
+        )
+        doc = FilterConditionsResource(
+            id=ObjectId(),
+            name="B",
+            field="urgency",
+            operator=FilterConditionOperator.NOT_IN,
+            value="2,3",
+        )
+        self.assertFalse(self.filter_conditions_service._are_equal(new_doc, doc))
 
-    def test_if_fc_is_used(self):
-        f = FilterConditionService()
-        with self.app.app_context():
-            self.assertTrue(f._get_referenced_filter_conditions(1).count() == 1)
-            self.assertTrue(f._get_referenced_filter_conditions(2).count() == 0)
+    async def test_if_fc_is_used(self):
+        self.assertEqual(
+            len(await self.filter_conditions_service._get_referenced_filter_conditions(FILTER_CONDITION_IDS[0])), 1
+        )
+        self.assertEqual(
+            len(await self.filter_conditions_service._get_referenced_filter_conditions(FILTER_CONDITION_IDS[1])), 0
+        )
 
-    def test_check_similar(self):
-        f = get_resource_service("filter_conditions")
+    async def test_check_similar(self):
         filter_condition1 = {"field": "urgency", "operator": "in", "value": "2"}
         filter_condition2 = {"field": "urgency", "operator": "in", "value": "3"}
         filter_condition3 = {"field": "urgency", "operator": "in", "value": "1"}
         filter_condition4 = {"field": "urgency", "operator": "in", "value": "5"}
         filter_condition5 = {"field": "urgency", "operator": "nin", "value": "5"}
         filter_condition6 = {"field": "headline", "operator": "like", "value": "tor"}
-        with self.app.app_context():
-            cmd = AppPopulateCommand()
-            filename = os.path.join(
-                os.path.abspath(os.path.dirname("apps/prepopulate/data_init/vocabularies.json")), "vocabularies.json"
-            )
-            cmd.run(filename)
-            self.assertTrue(len(f.check_similar(filter_condition1)) == 2)
-            self.assertTrue(len(f.check_similar(filter_condition2)) == 1)
-            self.assertTrue(len(f.check_similar(filter_condition3)) == 0)
-            self.assertTrue(len(f.check_similar(filter_condition4)) == 3)
-            self.assertTrue(len(f.check_similar(filter_condition5)) == 1)
-            self.assertTrue(len(f.check_similar(filter_condition6)) == 1)
 
-    def test_mongo_using_place_filter_complete_string(self):
+        cmd = AppPopulateCommand()
+        filename = os.path.join(
+            os.path.abspath(os.path.dirname("apps/prepopulate/data_init/vocabularies.json")), "vocabularies.json"
+        )
+        await cmd.run(filename)
+
+        self.assertEqual(len(await check_similar_filter_conditions(filter_condition1)), 2)
+        self.assertEqual(len(await check_similar_filter_conditions(filter_condition2)), 1)
+        self.assertEqual(len(await check_similar_filter_conditions(filter_condition3)), 0)
+        self.assertEqual(len(await check_similar_filter_conditions(filter_condition4)), 3)
+        self.assertEqual(len(await check_similar_filter_conditions(filter_condition5)), 1)
+        self.assertEqual(len(await check_similar_filter_conditions(filter_condition6)), 1)
+
+    async def test_mongo_using_place_filter_complete_string(self):
         f = FilterCondition("place", "in", "NSW")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("11", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("11", docs[0]["_id"])
 
-    def test_elastic_using_place_filter_complete_string(self):
+    async def test_elastic_using_place_filter_complete_string(self):
         f = FilterCondition("place", "match", "NSW")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query, "match")
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            doc_ids = [d["_id"] for d in docs]
-            self.assertEqual(1, docs.count())
-            self.assertTrue("11" in doc_ids)
+        self._setup_elastic_args(query, "match")
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        doc_ids = [d["_id"] for d in docs]
+        self.assertEqual(1, docs.count())
+        self.assertTrue("11" in doc_ids)
 
-    def test_mongo_using_ingest_provider_filter_eq(self):
+    async def test_mongo_using_ingest_provider_filter_eq(self):
         f = FilterCondition("ingest_provider", "eq", "1")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("4", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("4", docs[0]["_id"])
 
-    def test_elastic_using_ingest_provider_filter_eq(self):
+    async def test_elastic_using_ingest_provider_filter_eq(self):
         f = FilterCondition("ingest_provider", "eq", "1")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query)
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            doc_ids = [d["_id"] for d in docs]
-            self.assertEqual(1, docs.count())
-            self.assertTrue("4" in doc_ids)
+        self._setup_elastic_args(query)
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        doc_ids = [d["_id"] for d in docs]
+        self.assertEqual(1, docs.count())
+        self.assertTrue("4" in doc_ids)
 
-    def test_mongo_featuremedia_exists(self):
+    async def test_mongo_featuremedia_exists(self):
         f = FilterCondition("featuremedia", "exists", "true")
         query = f.get_mongo_query()
-        with self.app.app_context():
-            docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
-            self.assertEqual(1, docs.count())
-            self.assertEqual("4", docs[0]["_id"])
+        docs = get_resource_service("archive").get_from_mongo(req=self.req, lookup=query)
+        self.assertEqual(1, docs.count())
+        self.assertEqual("4", docs[0]["_id"])
 
-    def test_elastic_using_featuremedia_exists(self):
+    async def test_elastic_using_featuremedia_exists(self):
         f = FilterCondition("featuremedia", "exists", "true")
         query = f.get_elastic_query()
-        with self.app.app_context():
-            self._setup_elastic_args(query, search_type="exists")
-            docs = get_resource_service("archive").get(req=self.req, lookup=None)
-            doc_ids = [d["_id"] for d in docs]
-            self.assertEqual(1, docs.count())
-            self.assertTrue("4" in doc_ids)
+        self._setup_elastic_args(query, search_type="exists")
+        docs = get_resource_service("archive").get(req=self.req, lookup=None)
+        doc_ids = [d["_id"] for d in docs]
+        self.assertEqual(1, docs.count())
+        self.assertTrue("4" in doc_ids)
 
-    def test_filter_condition_value_deserialized(self):
+    async def test_filter_condition_value_deserialized(self):
         desk_id = bson.ObjectId()
         field = FilterConditionDeskField("")
-        value = FilterConditionValue(FilterConditionOperator.factory("in"), desk_id)
+        value = FilterConditionValue(OperatorFactory.factory("in"), desk_id)
         self.assertEqual([str(desk_id)], value._get_value(field))

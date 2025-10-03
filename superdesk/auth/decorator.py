@@ -1,7 +1,9 @@
 from typing import Optional
+from inspect import isawaitable
 from functools import wraps
-from flask import request
-from flask import current_app as app
+
+from superdesk.core import get_current_app
+from superdesk.flask import request
 
 
 def blueprint_auth(resource: Optional[str] = None):
@@ -11,11 +13,14 @@ def blueprint_auth(resource: Optional[str] = None):
 
     def fdec(f):
         @wraps(f)
-        def decorated(*args, **kwargs):
-            auth = app.auth
-            if not auth.authorized([], resource or "_blueprint", request.method):
+        async def decorated(*args, **kwargs):
+            auth = get_current_app().auth
+            if not await auth.authorized([], resource or "_blueprint", request.method):
                 return auth.authenticate()
-            return f(*args, **kwargs)
+            response = f(*args, **kwargs)
+            if isawaitable(response):
+                response = await response
+            return response
 
         return decorated
 

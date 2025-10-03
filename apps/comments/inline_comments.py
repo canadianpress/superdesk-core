@@ -1,7 +1,7 @@
 import re
 import bson
 
-from flask import current_app as app
+from superdesk.core import get_app_config
 
 from .user_mentions import notify_mentioned_users
 
@@ -10,7 +10,7 @@ from .user_mentions import notify_mentioned_users
 USER_MENTIONS_REGEX = re.compile(r"@\[([^]]+)\]\(user:([a-f0-9]{24})\)")
 
 
-def handle_inline_mentions(sender, updates, original):
+async def handle_inline_mentions(updates, original):
     """Listen to item_update signal and send notifications to new inline user mentions."""
     updated = original.copy()
     updated.update(updates)
@@ -19,7 +19,7 @@ def handle_inline_mentions(sender, updates, original):
         if not comment.get("notified"):
             users = _get_mentioned_users(comment)
             if users:
-                notify_mentioned_users(
+                await notify_mentioned_users(
                     [
                         {
                             "_id": "",
@@ -28,7 +28,7 @@ def handle_inline_mentions(sender, updates, original):
                             "mentioned_users": {user: bson.ObjectId(user) for user in users},
                         }
                     ],
-                    app.config.get("CLIENT_URL", "").rstrip("/"),
+                    get_app_config("CLIENT_URL", "").rstrip("/"),
                     item=updated,
                 )
             comment["notified"] = True

@@ -14,8 +14,9 @@ import superdesk
 
 from lxml import etree
 from lxml.etree import SubElement
-from flask import current_app as app
 
+from superdesk.core import get_app_config
+from superdesk.resource_fields import VERSION
 from superdesk import text_utils
 from superdesk.publish.formatters import Formatter
 from superdesk.metadata.item import ITEM_TYPE, CONTENT_TYPE, EMBARGO, FORMATS, FORMAT
@@ -27,12 +28,13 @@ from superdesk.filemeta import get_filemeta
 from superdesk import etree as sd_etree
 from superdesk.geonames import get_geonames_country_qcode, get_geonames_state_qcode, get_geonames_qcode
 from apps.archive.common import ARCHIVE, get_utc_schedule
+from superdesk.publish_async.utils import generate_sequence_number
 
 XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 
 
 def get_newsml_provider_id():
-    return app.config.get("NEWSML_PROVIDER_ID")
+    return get_app_config("NEWSML_PROVIDER_ID")
 
 
 def _get_cv_qcode(item):
@@ -51,6 +53,8 @@ class NewsMLG2Formatter(Formatter):
 
     name = "NewsML G2"
     type = "newsmlg2"
+    # Published_seq_num is used if format, so we can't use cache.
+    use_cache = False
 
     _message_nsmap = {
         None: "http://iptc.org/std/nar/2006-10-01/",
@@ -68,7 +72,9 @@ class NewsMLG2Formatter(Formatter):
     def _format_date(self, date):
         return date.strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
-    def format(self, article, subscriber, codes=None):
+    async def format(
+        self, article: dict, subscriber: dict | None, codes: list | None = None
+    ) -> list[tuple[int, str] | dict]:
         """Create article in NewsML G2 format
 
         :param dict article:
@@ -80,7 +86,7 @@ class NewsMLG2Formatter(Formatter):
         """
         try:
             self.subscriber = subscriber
-            pub_seq_num = superdesk.get_resource_service("subscribers").generate_sequence_number(subscriber)
+            pub_seq_num = await generate_sequence_number(subscriber)
             is_package = self._is_package(article)
             news_message = etree.Element("newsMessage", attrib=self._debug_message_extra, nsmap=self._message_nsmap)
             self._format_header(article, news_message, pub_seq_num)
@@ -106,7 +112,7 @@ class NewsMLG2Formatter(Formatter):
                 )
             ]
         except Exception as ex:
-            raise FormatterError.newmsmlG2FormatterError(ex, subscriber)
+            raise await FormatterError.newmsmlG2FormatterError(ex, subscriber).send_notifications()
 
     def _is_package(self, article):
         """Given an article returns if it is a none takes package or not
@@ -147,7 +153,7 @@ class NewsMLG2Formatter(Formatter):
                 "standard": "NewsML-G2",
                 "standardversion": "2.18",
                 "guid": article["guid"],
-                "version": str(article[superdesk.config.VERSION]),
+                "version": str(article[VERSION]),
                 XML_LANG: self._get_lang(article),
                 "conformance": "power",
             },
@@ -217,6 +223,7 @@ class NewsMLG2Formatter(Formatter):
         :param Element newsItem:
         :param dict article:
         """
+        # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
         rights = superdesk.get_resource_service("vocabularies").get_rightsinfo(article)
         rightsinfo = SubElement(newsItem, "rightsInfo")
         holder = SubElement(rightsinfo, "copyrightHolder")
@@ -597,11 +604,11 @@ class NewsMLG2Formatter(Formatter):
             return translations["name"][lang], lang
         except KeyError:
             pass
-        return subject.get("name", ""), app.config["DEFAULT_LANGUAGE"]
+        return subject.get("name", ""), get_app_config("DEFAULT_LANGUAGE")
 
     def _format_translated_name(self, dest, subject, article):
         name, lang = self._get_translated_name(subject, article)
         SubElement(dest, "name", attrib={XML_LANG: lang}).text = name
 
     def _get_lang(self, article):
-        return article.get("language", app.config["DEFAULT_LANGUAGE"])
+        return article.get("language", get_app_config("DEFAULT_LANGUAGE"))

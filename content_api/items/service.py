@@ -19,10 +19,10 @@ from superdesk.services import BaseService
 from superdesk.utc import utcnow
 from urllib.parse import urljoin, urlparse, quote
 
-from flask import current_app as app, g
-from flask import request
 from werkzeug.datastructures import MultiDict
 
+from superdesk.core import get_current_app, get_app_config
+from superdesk.flask import request, g
 from content_api.app.settings import ELASTIC_DATE_FORMAT
 from content_api.errors import BadParameterValueError, UnexpectedParameterError
 from content_api.items.resource import ItemsResource
@@ -223,6 +223,8 @@ class ItemsService(BaseService):
 
     def _process_item_renditions(self, item):
         hrefs = {}
+        app = get_current_app()
+
         if item.get("renditions"):
             renditions = {}
             for k, v in item["renditions"].items():
@@ -267,7 +269,7 @@ class ItemsService(BaseService):
             endpoint_name = "items"
 
         resource_url = "{api_url}/{endpoint}/".format(
-            api_url=app.config["CONTENTAPI_URL"], endpoint=app.config["URLS"][endpoint_name]
+            api_url=get_app_config("CONTENTAPI_URL"), endpoint=get_app_config("URLS")[endpoint_name]
         )
 
         return urljoin(resource_url, quote(document.get("_id", document.get("guid"))))
@@ -636,10 +638,10 @@ class InternalItemsService(BaseService):
             expiry_datetime = utcnow()
 
         if expiry_days is None:
-            expiry_days = app.config["CONTENT_API_EXPIRY_DAYS"]
+            expiry_days = get_app_config("CONTENT_API_EXPIRY_DAYS")
 
         if max_results is None:
-            max_results = app.config["CONTENT_API_EXPIRY_QUERY_LIMIT"]
+            max_results = get_app_config("CONTENT_API_EXPIRY_QUERY_LIMIT")
 
         expire_at = date_to_str(expiry_datetime - timedelta(days=expiry_days))
 

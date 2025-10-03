@@ -8,25 +8,24 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
-import flask
-import unittest
-
 from unittest.mock import patch
 from datetime import datetime, timedelta
 
 from apps.templates.filters import format_datetime_filter
 from apps.templates.content_templates import get_item_from_template, render_content_template
+from superdesk.tests import AsyncFlaskTestCase
 
 
-class RenderTemplateTestCase(unittest.TestCase):
-    def setUp(self):
-        self.app = flask.Flask(__name__)
-        self.ctx = self.app.app_context()
-        self.ctx.push()
-        self.addCleanup(self.ctx.pop)
+class RenderTemplateTestCase(AsyncFlaskTestCase):
+    app_config = {
+        "DEFAULT_SOURCE_VALUE_FOR_MANUAL_ARTICLES": "",
+    }
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
         self.app.jinja_env.filters["format_datetime"] = format_datetime_filter
 
-    def test_render_content_template(self):
+    async def test_render_content_template(self):
         template = {
             "_id": "foo",
             "template_name": "test",
@@ -55,7 +54,7 @@ class RenderTemplateTestCase(unittest.TestCase):
             "place": ["NSW"],
         }
 
-        updates = render_content_template(item, template)
+        updates = await render_content_template(item, template)
         self.assertEqual(updates["headline"], "Foo Template: Test Template")
         self.assertEqual(updates["urgency"], 1)
         self.assertEqual(updates["priority"], 3)
@@ -65,16 +64,16 @@ class RenderTemplateTestCase(unittest.TestCase):
         )
         self.assertListEqual(updates["place"], ["Australia"])
 
-    def test_headline_strip_tags(self):
+    async def test_headline_strip_tags(self):
         template = {"data": {"headline": " test\nit<br>"}}
 
-        updates = render_content_template({}, template)
+        updates = await render_content_template({}, template)
         self.assertEqual("test it", updates["headline"])
 
         item = get_item_from_template(template)
         self.assertEqual("test it", item["headline"])
 
-    def test_render_dateline_current_time(self):
+    async def test_render_dateline_current_time(self):
         now = datetime(2020, 12, 8, 13, 0, 0)
         template = {
             "data": {
@@ -94,5 +93,5 @@ class RenderTemplateTestCase(unittest.TestCase):
         }
 
         with patch("apps.templates.content_templates.utcnow", return_value=now):
-            updates = render_content_template({}, template)
+            updates = await render_content_template({}, template)
         self.assertEqual("PRAGUE, Dec 8  -", updates["dateline"]["text"])

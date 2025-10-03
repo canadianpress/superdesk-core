@@ -11,11 +11,13 @@
 import superdesk
 import superdesk.signals as signals
 
-from eve.utils import config
 from eve.versioning import resolve_document_version
-from flask import request, current_app as app
 from copy import deepcopy
 
+from superdesk.core import get_current_app
+from superdesk.eve_async.service import AsyncBaseService
+from superdesk.resource_fields import ID_FIELD, ETAG
+from superdesk.flask import request
 from apps.tasks import send_to, apply_onstage_rule
 from apps.desks import DeskTypes
 from superdesk import get_resource_service
@@ -34,7 +36,7 @@ from superdesk.resource import Resource
 from superdesk.services import BaseService
 from superdesk.metadata.utils import item_url
 from apps.archive.common import (
-    insert_into_versions,
+    insert_into_versions_async,
     item_operations,
     ITEM_OPERATION,
     set_sign_off,
@@ -45,7 +47,7 @@ from apps.archive.archive import SOURCE as ARCHIVE
 from superdesk.workflow import is_workflow_state_transition_valid
 from apps.content import push_item_move_notification
 from superdesk.lock import lock, unlock
-from flask_babel import _
+from quart_babel import gettext as _
 from superdesk.utc import utcnow
 
 ITEM_MOVE = "move"
@@ -76,8 +78,8 @@ class MoveResource(Resource):
     privileges = {"POST": "archive"}
 
 
-class MoveService(BaseService):
-    def create(self, docs, **kwargs):
+class MoveService(AsyncBaseService):
+    async def create_async(self, docs, **kwargs):
         guid_of_item_to_be_moved = request.view_args["guid"]
         guid_of_moved_items = []
 
@@ -90,12 +92,13 @@ class MoveService(BaseService):
         try:
             # doc represents the target desk and stage
             doc = docs[0]
-            moved_item = self.move_content(guid_of_item_to_be_moved, doc)
-            guid_of_moved_items.append(moved_item.get(config.ID_FIELD))
+            moved_item = await self.move_content(guid_of_item_to_be_moved, doc)
+            guid_of_moved_items.append(moved_item.get(ID_FIELD))
 
             if moved_item.get("type", None) == "composite" and doc.get("allPackageItems", False):
+                item_lock_id = None
+
                 try:
-                    item_lock_id = None
                     for item_id in (
                         ref[RESIDREF]
                         for group in moved_item.get(GROUPS, [])
@@ -104,8 +107,8 @@ class MoveService(BaseService):
                     ):
                         item_lock_id = "item_move {}".format(item_id)
                         if lock(item_lock_id, expire=5):
-                            item = self.move_content(item_id, doc)
-                            guid_of_moved_items.append(item.get(config.ID_FIELD))
+                            item = await self.move_content(item_id, doc)
+                            guid_of_moved_items.append(item.get(ID_FIELD))
                             unlock(item_lock_id, remove=True)
                             item_lock_id = None
                         else:
@@ -118,35 +121,35 @@ class MoveService(BaseService):
         finally:
             unlock(lock_id, remove=True)
 
-    def move_content(self, id, doc):
+    async def move_content(self, id, doc):
         archive_service = get_resource_service(ARCHIVE)
-        archived_doc = archive_service.find_one(req=None, _id=id)
+        archived_doc = await archive_service.find_one_async(req=None, _id=id)
 
         if not archived_doc:
             raise SuperdeskApiError.notFoundError(_("Failed to find item with guid: {guid}").format(guid=id))
 
         self._validate(archived_doc, doc)
-        self._move(archived_doc, doc)
+        await self._move(archived_doc, doc)
 
         # get the recent updates again
-        archived_doc = archive_service.find_one(req=None, _id=id)
+        archived_doc = await archive_service.find_one_async(req=None, _id=id)
         # finally apply any on stage rules/macros
-        apply_onstage_rule(archived_doc, id)
+        await apply_onstage_rule(archived_doc, id)
 
         # return etag of modified item
         doc["_etag"] = archived_doc["_etag"]
 
         return archived_doc
 
-    def _move(self, archived_doc, doc):
+    async def _move(self, archived_doc, doc):
         archive_service = get_resource_service(ARCHIVE)
         original = deepcopy(archived_doc)
         user = get_user()
-        send_to(
+        await send_to(
             doc=archived_doc,
             desk_id=doc.get("task", {}).get("desk"),
             stage_id=doc.get("task", {}).get("stage"),
-            user_id=user.get(config.ID_FIELD),
+            user_id=user.get(ID_FIELD),
         )
         if archived_doc[ITEM_STATE] not in (
             {
@@ -160,26 +163,28 @@ class MoveService(BaseService):
             archived_doc[ITEM_STATE] = CONTENT_STATE.SUBMITTED
         archived_doc[ITEM_OPERATION] = ITEM_MOVE
         # set the change in desk type when content is moved.
-        self.set_change_in_desk_type(archived_doc, original)
+        await self.set_change_in_desk_type(archived_doc, original)
         archived_doc.pop(SIGN_OFF, None)
         set_sign_off(archived_doc, original=original)
         convert_task_attributes_to_objectId(archived_doc)
         resolve_document_version(archived_doc, ARCHIVE, "PATCH", original)
 
-        del archived_doc[config.ID_FIELD]
-        del archived_doc[config.ETAG]  # force etag update
+        del archived_doc[ID_FIELD]
+        del archived_doc[ETAG]  # force etag update
         archived_doc["versioncreated"] = utcnow()
 
         signals.item_move.send(self, item=archived_doc, original=original)
-        archive_service.update(original[config.ID_FIELD], archived_doc, original)
+        await archive_service.update_async(original[ID_FIELD], archived_doc, original)
 
-        insert_into_versions(id_=original[config.ID_FIELD])
+        await insert_into_versions_async(id_=original[ID_FIELD])
         push_item_move_notification(original, archived_doc)
-        app.on_archive_item_updated(archived_doc, original, ITEM_MOVE)
+
+        app = get_current_app().as_any()
+        await app.on_archive_item_updated.call_async(archived_doc, original, ITEM_MOVE)
 
         # make sure `item._id` is there in signal
         moved_item = archived_doc.copy()
-        moved_item[config.ID_FIELD] = original[config.ID_FIELD]
+        moved_item[ID_FIELD] = original[ID_FIELD]
         signals.item_moved.send(self, item=moved_item, original=original)
 
     def _validate(self, archived_doc, doc):
@@ -194,7 +199,7 @@ class MoveService(BaseService):
         if not is_workflow_state_transition_valid("submit_to_desk", archived_doc[ITEM_STATE]):
             raise InvalidStateTransitionError()
 
-    def set_change_in_desk_type(self, updated, original):
+    async def set_change_in_desk_type(self, updated, original):
         """Detects if the change in the desk is between authoring to production (and vice versa).
 
         Sets the field 'last_production_desk' and 'last_authoring_desk'.
@@ -205,8 +210,8 @@ class MoveService(BaseService):
         old_desk_id = str(original.get("task", {}).get("desk", ""))
         new_desk_id = str(updated.get("task", {}).get("desk", ""))
         if old_desk_id and old_desk_id != new_desk_id:
-            old_desk = get_resource_service("desks").find_one(req=None, _id=old_desk_id)
-            new_desk = get_resource_service("desks").find_one(req=None, _id=new_desk_id)
+            old_desk = await get_resource_service("desks").find_one_async(req=None, _id=old_desk_id)
+            new_desk = await get_resource_service("desks").find_one_async(req=None, _id=new_desk_id)
             if old_desk and new_desk and old_desk.get("desk_type", "") != new_desk.get("desk_type", ""):
                 if new_desk.get("desk_type") == DeskTypes.production.value:
                     updated["task"][LAST_AUTHORING_DESK] = old_desk_id

@@ -12,14 +12,17 @@ import logging
 
 from copy import deepcopy
 
-from flask_babel import lazy_gettext
+from quart_babel import lazy_gettext
 from apps.tasks import send_to
 from superdesk import register_resource, get_resource_service, privilege
-from superdesk.services import Service
+from superdesk.types import ContentFiltersResource
+from superdesk.eve_async import AsyncBaseService
 from superdesk.resource import Resource
 from superdesk.errors import StopDuplication
-from superdesk.signals import item_published, item_routed
+from superdesk.signals import item_published_async, item_routed
 from superdesk.metadata.item import PUBLISH_SCHEDULE, SCHEDULE_SETTINGS
+from superdesk.publish_async.publish_cache import PublishCache
+from superdesk.publish_async.utils import item_matches_content_filter
 
 
 NAME = "internal_destinations"
@@ -41,34 +44,35 @@ class InternalDestinationsResource(Resource):
     privileges = {"POST": "internal_destinations", "PATCH": "internal_destinations", "DELETE": "internal_destinations"}
 
 
-class InternalDestinationsService(Service):
+class InternalDestinationsService(AsyncBaseService):
     pass
 
 
-def handle_item_published(sender, item, desk=None, **extra):
+async def handle_item_published(item, after_scheduled):
     macros_service = get_resource_service("macros")
     archive_service = get_resource_service("archive")
-    filters_service = get_resource_service("content_filters")
+    filters_service = ContentFiltersResource.get_service()
     destinations_service = get_resource_service(NAME)
+    await PublishCache.init()
 
     for dest in destinations_service.get(req=None, lookup={"is_active": True}):
-        item_desk = desk["_id"] if desk is not None else item.get("task").get("desk")
+        item_desk = item.get("task").get("desk")
         if dest.get("desk") == item_desk:
             # item desk and internal destination are same then don't execute
             continue
 
         if dest.get("filter"):
-            content_filter = filters_service.find_one(req=None, _id=dest["filter"])
+            content_filter = await filters_service.find_one(req=None, _id=dest["filter"])
             if not content_filter:  # error state sort of, not sure what to do
                 continue
-            if not filters_service.does_match(content_filter, item):
+            if not item_matches_content_filter(item, content_filter):
                 continue
-        if not extra.get("after_scheduled") and item[PUBLISH_SCHEDULE] is not None and dest.get("send_after_schedule"):
+        if not after_scheduled and item[PUBLISH_SCHEDULE] is not None and dest.get("send_after_schedule"):
             # if "after_schedule" is set to False  and item[PUBLISH_SCHEDULE] is not None (in case of scheduled item)
             # and send_after_schedule is True then don't execute
             # item is being published immediately not depend on config send_after_schedule
             continue
-        if extra.get("after_scheduled") and not dest.get("send_after_schedule"):
+        if after_scheduled and not dest.get("send_after_schedule"):
             # if after_schedule is set to True and send_after_schedule is False
             # then don't execute
             continue
@@ -79,7 +83,7 @@ def handle_item_published(sender, item, desk=None, **extra):
         new_item = deepcopy(item)
 
         try:
-            send_to(new_item, desk_id=dest["desk"], stage_id=dest.get("stage"))
+            await send_to(new_item, desk_id=dest["desk"], stage_id=dest.get("stage"))
         except StopDuplication:
             continue
 
@@ -89,7 +93,7 @@ def handle_item_published(sender, item, desk=None, **extra):
                 logger.warning("macro %s not found for internal destination %s", dest["macro"], dest["name"])
             else:
                 try:
-                    macro["callback"](
+                    await macro["callback"](
                         new_item,
                         dest_desk_id=dest.get("desk"),
                         dest_stage_id=dest.get("stage"),
@@ -99,9 +103,9 @@ def handle_item_published(sender, item, desk=None, **extra):
                     continue
 
         extra_fields = [PUBLISH_SCHEDULE, SCHEDULE_SETTINGS]
-        next_id = archive_service.duplicate_item(new_item, state="routed", extra_fields=extra_fields)
-        next_item = archive_service.find_one(req=None, _id=next_id)
-        item_routed.send(sender, item=next_item)
+        next_id = await archive_service.duplicate_item(new_item, state="routed", extra_fields=extra_fields)
+        next_item = await archive_service.find_one_async(req=None, _id=next_id)
+        item_routed.send(None, item=next_item)
 
 
 def init_app(app) -> None:
@@ -113,4 +117,4 @@ def init_app(app) -> None:
         description=lazy_gettext("User can manage internal destinations."),
     )
 
-    item_published.connect(handle_item_published)
+    item_published_async.connect(handle_item_published)

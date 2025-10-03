@@ -10,49 +10,48 @@
 
 import json
 
-from unittest import mock
 from datetime import timedelta
 
 from superdesk.utc import utcnow
-from superdesk.tests import TestCase
+from superdesk.tests import TestCase, utils as test_utils, fixtures
 from superdesk.publish.formatters.ninjs_newsroom_formatter import NewsroomNinjsFormatter
 from superdesk.publish import init_app
 
-import planning.assignments as planning_assignments
-import planning.planning as planning_planning
 
-
-@mock.patch("superdesk.publish.subscribers.SubscribersService.generate_sequence_number", lambda self, subscriber: 1)
 class NewsroomNinjsFormatterTest(TestCase):
-    def setUp(self):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
         self.formatter = NewsroomNinjsFormatter()
         init_app(self.app)
         self.maxDiff = None
+        self.subscriber = fixtures.subscribers.sub1_subscriber().to_dict()
 
-    def test_products(self):
-        self.app.data.insert(
-            "content_filters",
-            [{"_id": 3, "content_filter": [{"expression": {"pf": [1], "fc": [2]}}], "name": "soccer-only3"}],
-        )
-        self.app.data.insert(
+    async def test_products(self):
+        fc_ids = await test_utils.post_items(
             "filter_conditions",
-            [{"_id": 1, "field": "headline", "operator": "like", "value": "test", "name": "test-1"}],
+            [
+                {"field": "headline", "operator": "like", "value": "test", "name": "test-1"},
+                {"field": "urgency", "operator": "in", "value": "2", "name": "test-2"},
+            ],
         )
-        self.app.data.insert(
-            "filter_conditions", [{"_id": 2, "field": "urgency", "operator": "in", "value": "2", "name": "test-2"}]
+
+        cf_ids = await test_utils.post_items(
+            "content_filters",
+            [{"content_filter": [{"expression": {"pf": [fc_ids[0]], "fc": [fc_ids[1]]}}], "name": "soccer-only3"}],
         )
-        self.app.data.insert(
+
+        product_ids = await test_utils.post_items(
             "products",
             [
                 {
-                    "_id": 1,
-                    "content_filter": {"filter_id": 3, "filter_type": "permitting"},
+                    # "_id": 1,
+                    "content_filter": {"filter_id": cf_ids[0], "filter_type": "permitting"},
                     "name": "p-1",
                     "product_type": "api",
                 }
             ],
         )
-        self.app.data.insert(
+        await test_utils.post_items(
             "vocabularies",
             [
                 {
@@ -110,7 +109,7 @@ class NewsroomNinjsFormatterTest(TestCase):
             "extra": {"foo": "test"},
             "operation": "publish",
         }
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         expected = {
             "guid": "tag:aap.com.au:20150613:12345",
             "version": "1",
@@ -147,13 +146,13 @@ class NewsroomNinjsFormatterTest(TestCase):
             "charcount": 67,
             "wordcount": 13,
             "readtime": 0,
-            "products": [{"code": 1, "name": "p-1"}],
+            "products": [{"code": str(product_ids[0]), "name": "p-1"}],
         }
         self.assertEqual(json.loads(doc), expected)
-        article.update(urgency=1, _id="v2")
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        article.update(urgency=1, _id="v2", guid="v2")
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         expected = {
-            "guid": "tag:aap.com.au:20150613:12345",
+            "guid": "v2",
             "version": "1",
             "place": [{"code": "NSW", "name": "New South Wales"}],
             "pubstatus": "usable",
@@ -192,12 +191,9 @@ class NewsroomNinjsFormatterTest(TestCase):
         }
         self.assertEqual(json.loads(doc), expected)
 
-    def test_planning_data(self):
-        planning_assignments.init_app(self.app)
-        planning_planning.init_app(self.app)
-
-        assignments = [{"coverage_item": "urn:coverage-id", "planning_item": "urn:planning-id"}]
-        self.app.data.insert("assignments", assignments)
+    async def test_planning_data(self):
+        assignments = [{"coverage_item": "urn:coverage-id", "planning_item": "urn:planning-id", "planning": {}}]
+        await test_utils.post_items("assignments", assignments)
 
         article = {
             "_id": "tag:aap.com.au:20150613:12345",
@@ -207,13 +203,13 @@ class NewsroomNinjsFormatterTest(TestCase):
             "assignment_id": assignments[0]["_id"],
         }
 
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         data = json.loads(doc)
 
         self.assertEqual("urn:planning-id", data["planning_id"])
         self.assertEqual("urn:coverage-id", data["coverage_id"])
 
-    def test_picture_formatter(self):
+    async def test_picture_formatter(self):
         article = {
             "guid": "20150723001158606583",
             "_current_version": 1,
@@ -241,7 +237,7 @@ class NewsroomNinjsFormatterTest(TestCase):
             "description": "The most amazing picture you will ever see",
             "body_footer": "<p>call helpline 999 if you are planning to quit smoking</p>",
         }
-        seq, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        seq, doc = (await self.formatter.format(article, self.subscriber))[0]
         expected = {
             "byline": "MICKEY MOUSE",
             "renditions": {
@@ -273,7 +269,7 @@ class NewsroomNinjsFormatterTest(TestCase):
         self.assertEqual(expected, json.loads(doc))
         self.assertIn("viewImage", json.loads(doc).get("renditions"))
 
-    def test_auto_published_item(self):
+    async def test_auto_published_item(self):
         article = {
             "guid": "foo",
             "_current_version": 1,
@@ -289,16 +285,16 @@ class NewsroomNinjsFormatterTest(TestCase):
             "description": "The most amazing picture you will ever see",
             "body_footer": "<p>call helpline 999 if you are planning to quit smoking</p>",
         }
-        _, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        _, doc = (await self.formatter.format(article, self.subscriber))[0]
         processed = json.loads(doc)
         self.assertEqual(processed["guid"], "foo")
         article["ingest_id"] = "bar"
         article["ingest_version"] = "7"
-        _, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        _, doc = (await self.formatter.format(article, self.subscriber))[0]
         processed = json.loads(doc)
         self.assertEqual(processed["guid"], "foo")
         article["auto_publish"] = True
-        _, doc = self.formatter.format(article, {"name": "Test Subscriber"})[0]
+        _, doc = (await self.formatter.format(article, self.subscriber))[0]
         processed = json.loads(doc)
         self.assertEqual(processed["guid"], "bar")
         self.assertEqual(processed["version"], "7")

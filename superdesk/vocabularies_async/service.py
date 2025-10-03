@@ -1,0 +1,304 @@
+# -*- coding: utf-8; -*-
+#
+# This file is part of Superdesk.
+#
+# Copyright 2013, 2025 Sourcefabric z.u. and contributors.
+#
+# For the full copyright and license information, please see the
+# AUTHORS and LICENSE files distributed with this source code, or
+# at https://www.sourcefabric.org/superdesk/license
+
+
+import logging
+from typing import Any, Dict, Optional
+from typing import List
+
+from quart_babel import gettext, lazy_gettext
+
+from superdesk import privilege
+from superdesk.cache import cache
+from superdesk.core.resources import ResourceModel, AsyncResourceService
+from superdesk.default_schema import DEFAULT_EDITOR, DEFAULT_SCHEMA
+from superdesk.errors import SuperdeskApiError
+from superdesk.notification import push_notification
+from superdesk.resource_fields import ID_FIELD
+from superdesk.types.vocabularies import CVItem, VocabulariesResourceModel, CVAccessType
+from superdesk.users import get_user_from_request
+from superdesk.utc import utcnow
+
+logger = logging.getLogger(__name__)
+
+KEYWORDS_CV = "keywords"
+
+
+privilege(
+    name="vocabularies",
+    label=lazy_gettext("Vocabularies Management"),
+    description=lazy_gettext("User can manage vocabularies' contents."),
+)
+
+
+# TODO(petr): add api to specify vocabulary schema
+vocab_schema = {
+    "crop_sizes": {
+        "width": {"type": "integer"},
+        "height": {"type": "integer"},
+    }
+}
+
+
+class VocabulariesService(AsyncResourceService[VocabulariesResourceModel]):
+    system_keys = set(DEFAULT_SCHEMA.keys()).union(set(DEFAULT_EDITOR.keys()))
+
+    async def _validate_items(self, update: VocabulariesResourceModel) -> None:
+        # if we have qcode and not unique_field set, we want it to be qcode
+        if update.schema_.get("qcode") and update.unique_field is None:
+            update.unique_field = "qcode"
+
+        unique_field = update.unique_field
+        vocabs: dict[str, list[Any]] = {}
+        if update.schema_ and update.items:
+            for index, item in enumerate(update.items):
+                for field, desc in update.schema_.items():
+                    if (desc.get("required", False) or unique_field == field) and not getattr(item, field, None):
+                        msg = f"Required {field} in item {index}"
+                        payload = {"error": {"required_field": 1}, "params": {"field": field, "item": index}}
+                        raise SuperdeskApiError.badRequestError(message=msg, payload=payload)
+
+                    elif desc.get("link_vocab") and desc.get("link_field"):
+                        if not vocabs.get(desc["link_vocab"]):
+                            linked_vocab = await self.find_by_id(desc["link_vocab"])
+                            items = linked_vocab.items if linked_vocab else []
+                            vocabs[desc["link_vocab"]] = [getattr(vocab, desc["link_field"], None) for vocab in items]
+
+                        if (field_value := getattr(item, field, None)) and field_value not in vocabs[
+                            desc["link_vocab"]
+                        ]:
+                            msg = '{} "{}={}" not found'.format(desc["link_vocab"], desc["link_field"], field_value)
+                            payload = {"error": {"required_field": 1, "params": {"field": field, "item": index}}}
+                            raise SuperdeskApiError.badRequestError(message=msg, payload=payload)
+
+    async def on_create(self, docs: List[VocabulariesResourceModel]) -> None:
+        for doc in docs:
+            await self._validate_items(doc)
+
+            if doc.field_type and doc.id in self.system_keys:
+                raise SuperdeskApiError(message=f"{doc.id} is in use", payload={"_id": {"conflict": 1}})
+
+            if await self.find_one(_id=doc.id, _deleted=True):
+                raise SuperdeskApiError(
+                    message=f"{doc.id} is used by deleted vocabulary", payload={"_id": {"deleted": 1}}
+                )
+
+    async def on_created(self, docs: List[VocabulariesResourceModel]):
+        for doc in docs:
+            self._send_notification(doc, event="vocabularies:created")
+
+    async def on_replace(self, document: VocabulariesResourceModel, original: VocabulariesResourceModel) -> None:
+        await self._validate_items(document)
+        document.updated = utcnow()
+        document.created = original.created or utcnow()
+        logger.info(f"updating vocabulary item: {document.id}")
+
+    async def on_update(self, updates: dict[str, Any], original: VocabulariesResourceModel) -> None:
+        """Checks the duplicates if a unique field is defined"""
+        if "items" in updates:
+            updated = original.clone_with(updates)
+            await self._validate_items(updated)
+        if original.unique_field:
+            self._check_uniqueness(updates.get("items", []), original.unique_field)
+
+    async def on_updated(self, updates: dict[str, Any], original: VocabulariesResourceModel) -> None:
+        """
+        Overriding this to send notification about the replacement
+        """
+        self._send_notification(original)
+
+    async def on_replaced(self, document: VocabulariesResourceModel, original: VocabulariesResourceModel):
+        """
+        Overriding this to send notification about the replacement
+        """
+        self._send_notification(document)
+
+    async def on_delete(self, doc: VocabulariesResourceModel):
+        """
+        Overriding to validate vocabulary deletion
+        """
+        if not doc.field_type:
+            raise SuperdeskApiError.badRequestError("Default vocabularies cannot be deleted")
+
+    def _check_uniqueness(self, items: list[dict[str, Any]], unique_field: str) -> None:
+        """Checks the uniqueness if a unique field is defined
+
+        :param items: list of items to check for uniqueness
+        :param unique_field: name of the unique field
+        """
+        unique_values = set()
+        for item in items:
+            # compare only the active items
+            if not item.get("is_active"):
+                continue
+
+            if not item.get(unique_field):
+                raise SuperdeskApiError.badRequestError(f"{unique_field} cannot be empty")
+
+            unique_value = str(item.get(unique_field)).upper()
+
+            if unique_value in unique_values:
+                raise SuperdeskApiError.badRequestError(
+                    f"Value {item.get(unique_field)} for field {unique_field} is not unique"
+                )
+
+            unique_values.add(unique_value)
+
+    def _send_notification(self, updated_vocabulary: VocabulariesResourceModel, event="vocabularies:updated") -> None:
+        """
+        Sends notification about the updated vocabulary to all the connected clients.
+        """
+
+        user = get_user_from_request()
+        push_notification(
+            event,
+            vocabulary=updated_vocabulary.display_name,
+            user=str(user[ID_FIELD]) if user else None,
+            vocabulary_id=updated_vocabulary.id,
+        )
+
+    async def get_rightsinfo(self, item: ResourceModel | dict) -> dict[str, Any]:
+        """Retrieve rights information for the given item.
+
+        :param item: The item to retrieve rights information for
+        :return: Dictionary containing copyright holder, notice and usage terms
+        """
+
+        rights_key = getattr(item, "source", getattr(item, "original_source", "default"))
+        all_rights = await self.find_by_id("rightsinfo")
+
+        if not all_rights or not all_rights.items:
+            return {}
+
+        try:
+            all_rights.items = await self.get_locale_vocabulary(all_rights.items, getattr(item, "language", None))
+            default_rights = next(info for info in all_rights.items if getattr(info, "name", None) == "default")
+        except StopIteration:
+            default_rights = None
+
+        rights: CVItem | None
+
+        try:
+            rights = next(info for info in all_rights.items if getattr(info, "name", None) == rights_key)
+        except StopIteration:
+            rights = default_rights
+
+        if rights:
+            return {
+                "copyrightholder": getattr(rights, "copyright_holder", None),
+                "copyrightnotice": getattr(rights, "copyright_notice", None),
+                "usageterms": getattr(rights, "usage_terms", None),
+            }
+        return {}
+
+    async def get_extra_fields(self) -> list[VocabulariesResourceModel]:
+        cursor = await self.search(lookup={"field_type": {"$exists": True, "$ne": None}})
+        return await cursor.to_list()
+
+    async def get_custom_vocabularies(self) -> list[VocabulariesResourceModel]:
+        cursor = await self.search(lookup={"field_type": None, "service": {"$exists": True}})
+        return await cursor.to_list()
+
+    async def get_forbiden_custom_vocabularies(self) -> list[VocabulariesResourceModel]:
+        cursor = await self.search(
+            lookup={
+                "field_type": None,
+                "selection_type": "do not show",
+                "service": {"$exists": True},
+            },
+        )
+        return await cursor.to_list()
+
+    async def get_locale_vocabulary(self, vocabulary: list[CVItem], language: str | None) -> list[CVItem]:
+        if not vocabulary or not language:
+            return vocabulary
+        locale_vocabulary = []
+        for item in vocabulary:
+            new_item = item.clone()
+            if not new_item.translations:
+                locale_vocabulary.append(new_item)
+                continue
+            locale_vocabulary.append(new_item)
+            for field, values in new_item.translations.items():
+                if hasattr(new_item, field) and language in values:
+                    setattr(new_item, field, values[language])
+        return locale_vocabulary
+
+    async def add_missing_keywords(self, keywords, language: str | None = None) -> None:
+        # FIXME: language is not use here.
+        if not keywords:
+            return
+        cv = await self.find_by_id(KEYWORDS_CV)
+        if cv:
+            existing = {item.name.lower() for item in cv.items}
+            missing = [keyword for keyword in keywords if keyword.lower() not in existing]
+            if missing:
+                updates = {"items": cv.items.copy()}
+                for keyword in missing:
+                    updates["items"].append(
+                        CVItem(
+                            name=keyword,
+                            qcode=keyword,
+                            is_active=True,
+                        )
+                    )
+                await self.on_update(updates, cv)
+                await self.system_update(cv.id, updates)
+                await self.on_updated(updates, cv)
+        else:
+            items = [
+                CVItem(
+                    name=keyword,
+                    qcode=keyword,
+                    is_active=True,
+                )
+                for keyword in keywords
+            ]
+            cv = VocabulariesResourceModel(
+                id=KEYWORDS_CV,
+                items=items,
+                management_type=CVAccessType.MANAGEABLE,
+                display_name=gettext("Keywords"),
+                unique_field="name",
+                schema_={
+                    "name": {},
+                    "qcode": {},
+                },
+            )
+            await self.create([cv])
+
+    async def get_article_cv_item(self, item: Dict[str, Any], scheme: str):
+        article_item = {k: v for k, v in item.items() if k != "is_active"}
+        article_item.update({"scheme": scheme})
+        return article_item
+
+    async def get_field_options(self, field) -> dict[str, Any]:
+        cv = await self.find_by_id(field)
+        return cv.field_options if cv else {}
+
+
+@cache(ttl=3600, tags=("vocabularies",))
+async def get_related_field_ids():
+    service = VocabulariesService()
+    cursor = await service.find(
+        {"field_type": "related_content"},
+        projection={"field_type": 1},
+    )
+    return await cursor.to_list()
+
+
+async def is_related_content(item_name, related_content=None):
+    if related_content is None:
+        related_content = await get_related_field_ids()
+
+    if related_content and item_name.split("--")[0] in [content.id for content in related_content]:
+        return True
+
+    return False

@@ -38,7 +38,7 @@ def media_put_mock(content, filename=None, content_type=None, metadata=None, res
 class PictureCropServiceTest(TestCase):
     @mock.patch("apps.picture_crop.get_file", side_effect=get_file_mock)
     @mock.patch("apps.picture_crop.crop_image", side_effect=crop_image_mock)
-    def test_crop_image_copies_metadata(self, get_file_function, crop_image_function):
+    async def test_crop_image_copies_metadata(self, get_file_function, crop_image_function):
         service = get_resource_service("picture_crop")
         images = [
             {
@@ -48,7 +48,7 @@ class PictureCropServiceTest(TestCase):
         ]
 
         with mock.patch.object(self.app.media, "put", return_value="foo"):
-            service.post(images)
+            await service.post_async(images)
 
         self.assertEqual(images[0]["metadata"].get("datetime"), '"2015:07:06 16:30:23"')
         self.assertEqual(images[0]["metadata"].get("length"), "144732")

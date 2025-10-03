@@ -22,7 +22,7 @@ from typing import Dict
 from textwrap import dedent
 from collections.abc import MutableSequence
 
-from flask import current_app as app
+from superdesk.core import get_app_config
 
 from draftjs_exporter.html import HTML
 from draftjs_exporter.constants import ENTITY_TYPES, INLINE_STYLES, BLOCK_TYPES
@@ -444,7 +444,7 @@ class DraftJSHTMLExporter:
         return DOM.create_element("a", attribs, props["children"])
 
     def render_embed(self, props):
-        embed_pre_process = app.config.get("EMBED_PRE_PROCESS")
+        embed_pre_process = get_app_config("EMBED_PRE_PROCESS")
         if embed_pre_process:
             for callback in embed_pre_process:
                 callback(props["data"])
@@ -859,6 +859,7 @@ def generate_fields(item, fields=None, force=False, reload=False, original=None)
 def is_html(field) -> bool:
     field_id = get_field_id(field)
     if field_id != field:
+        # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
         field_options = superdesk.get_resource_service("vocabularies").get_field_options(field_id)
         return field_options.get("single") is not True
     return field not in TEXT_FIELDS

@@ -10,9 +10,9 @@
 
 import logging
 
-from eve.utils import config
-from flask import g, current_app as app
-
+from superdesk.resource_fields import ID_FIELD
+from superdesk.core import get_app_config
+from superdesk.flask import g
 import superdesk
 from superdesk import get_resource_service
 from superdesk.activity import (
@@ -27,9 +27,10 @@ from superdesk.io import allowed_feeding_services, allowed_feed_parsers, get_fee
 from superdesk.metadata.item import CONTENT_STATE, CONTENT_TYPE
 from superdesk.notification import push_notification
 from superdesk.resource import Resource
-from superdesk.services import BaseService
+from superdesk.eve_async import AsyncBaseService
 from superdesk.utc import utcnow
 from superdesk.utils import required_string
+from superdesk.types import UsersResourceModel, UserTypeEnum
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ class IngestProviderResource(Resource):
             "content_types": {"type": "list", "default": tuple(CONTENT_TYPE), "allowed": tuple(CONTENT_TYPE)},
             "allow_remove_ingested": {"type": "boolean", "default": False},
             "disable_item_updates": {"type": "boolean", "default": False},
-            "content_expiry": {"type": "integer", "default": app.config["INGEST_EXPIRY_MINUTES"]},
+            "content_expiry": {"type": "integer", "default": get_app_config("INGEST_EXPIRY_MINUTES")},
             "config": {
                 "type": "dict",
                 "schema": {},
@@ -159,7 +160,7 @@ class IngestProviderResource(Resource):
         super().__init__(endpoint_name, app, service, endpoint_schema=endpoint_schema)
 
 
-class IngestProviderService(BaseService):
+class IngestProviderService(AsyncBaseService):
     def __init__(self, datasource=None, backend=None):
         super().__init__(datasource=datasource, backend=backend)
 
@@ -175,60 +176,60 @@ class IngestProviderService(BaseService):
             doc["last_opened"]["opened_at"] = utcnow()
             doc["last_opened"]["opened_by"] = user["_id"] if user else None
 
-    @property
-    def user_service(self):
-        return get_resource_service("users")
-
-    def on_create(self, docs):
+    async def on_create_async(self, docs):
         for doc in docs:
             content_expiry = doc.get("content_expiry", 0)
             if content_expiry == 0:
-                doc["content_expiry"] = app.config["INGEST_EXPIRY_MINUTES"]
+                doc["content_expiry"] = get_app_config("INGEST_EXPIRY_MINUTES")
                 self._set_provider_status(doc, doc.get("last_closed", {}).get("message", ""))
             elif content_expiry < 0:
                 doc["content_expiry"] = None
-            self._test_config(doc)
+            await self._test_config(doc)
 
-    def on_created(self, docs):
+    async def on_created_async(self, docs):
         for doc in docs:
-            notify_and_add_activity(
+            await notify_and_add_activity(
                 ACTIVITY_CREATE,
                 "Created Ingest Channel {{name}}",
                 self.datasource,
                 item=None,
-                user_list=self.user_service.get_users_by_user_type("administrator"),
+                user_list=[
+                    user.to_dict() for user in await UsersResourceModel.get_by_user_type(UserTypeEnum.ADMINISTRATOR)
+                ],
                 name=doc.get("name"),
                 provider_id=doc.get("_id"),
             )
             push_notification("ingest_provider:create", provider_id=str(doc.get("_id")))
         logger.info("Created Ingest Channel. Data:{}".format(docs))
 
-    def on_update(self, updates, original):
+    async def on_update_async(self, updates, original):
         try:
             content_expiry = updates["content_expiry"]
         except KeyError:
             content_expiry = None
         else:
             if content_expiry == 0:
-                content_expiry = app.config["INGEST_EXPIRY_MINUTES"]
+                content_expiry = get_app_config("INGEST_EXPIRY_MINUTES")
             elif content_expiry < 0:
                 content_expiry = None
             updates["content_expiry"] = content_expiry
         if "is_closed" in updates and original.get("is_closed", False) != updates.get("is_closed"):
             self._set_provider_status(updates, updates.get("last_closed", {}).get("message", ""))
         if "config" in updates:
-            self._test_config(updates, original)
+            await self._test_config(updates, original)
 
-    def on_updated(self, updates, original):
+    async def on_updated_async(self, updates, original):
         do_notification = updates.get("notifications", {}).get(
             "on_update", original.get("notifications", {}).get("on_update", True)
         )
-        notify_and_add_activity(
+        await notify_and_add_activity(
             ACTIVITY_UPDATE,
             "updated Ingest Channel {{name}}",
             self.datasource,
             item=None,
-            user_list=self.user_service.get_users_by_user_type("administrator") if do_notification else None,
+            user_list=[user.to_dict() for user in await UsersResourceModel.get_by_user_type(UserTypeEnum.ADMINISTRATOR)]
+            if do_notification
+            else None,
             name=updates.get("name", original.get("name")),
             provider_id=original.get("_id"),
         )
@@ -248,12 +249,16 @@ class IngestProviderService(BaseService):
                     "on_open", original.get("notifications", {}).get("on_open", True)
                 )
 
-            notify_and_add_activity(
+            await notify_and_add_activity(
                 ACTIVITY_EVENT,
                 "{{status}} Ingest Channel {{name}}",
                 self.datasource,
                 item=None,
-                user_list=self.user_service.get_users_by_user_type("administrator") if do_notification else None,
+                user_list=[
+                    user.to_dict() for user in await UsersResourceModel.get_by_user_type(UserTypeEnum.ADMINISTRATOR)
+                ]
+                if do_notification
+                else None,
                 name=updates.get("name", original.get("name")),
                 status=status,
                 provider_id=original.get("_id"),
@@ -262,7 +267,7 @@ class IngestProviderService(BaseService):
         push_notification("ingest_provider:update", provider_id=str(original.get("_id")))
         logger.info("Updated Ingest Channel. Data: {}".format(updates))
 
-    def on_delete(self, doc):
+    async def on_delete_async(self, doc):
         """
         Overriding to check if the Ingest Source which has received item being deleted.
         """
@@ -270,26 +275,28 @@ class IngestProviderService(BaseService):
         if doc.get("last_item_update"):
             raise SuperdeskApiError.forbiddenError("Deleting an Ingest Source after receiving items is prohibited.")
 
-    def on_deleted(self, doc):
+    async def on_deleted_async(self, doc):
         """
         Overriding to send notification and record activity about channel deletion.
         """
-        notify_and_add_activity(
+        await notify_and_add_activity(
             ACTIVITY_DELETE,
             "Deleted Ingest Channel {{name}}",
             self.datasource,
             item=None,
-            user_list=self.user_service.get_users_by_user_type("administrator"),
+            user_list=[
+                user.to_dict() for user in await UsersResourceModel.get_by_user_type(UserTypeEnum.ADMINISTRATOR)
+            ],
             name=doc.get("name"),
-            provider_id=doc.get(config.ID_FIELD),
+            provider_id=doc.get(ID_FIELD),
         )
-        push_notification("ingest_provider:delete", provider_id=str(doc.get(config.ID_FIELD)))
-        get_resource_service("sequences").delete(
-            lookup={"key": "ingest_providers_{_id}".format(_id=doc[config.ID_FIELD])}
+        push_notification("ingest_provider:delete", provider_id=str(doc.get(ID_FIELD)))
+        await get_resource_service("sequences").delete_async(
+            lookup={"key": "ingest_providers_{_id}".format(_id=doc[ID_FIELD])}
         )
         logger.info("Deleted Ingest Channel. Data:{}".format(doc))
 
-    def _test_config(self, updates, original=None):
+    async def _test_config(self, updates, original=None):
         provider = original.copy() if original else {}
         provider.update(updates)
 
@@ -300,7 +307,8 @@ class IngestProviderService(BaseService):
             service = get_feeding_service(provider["feeding_service"])
         except KeyError:
             return
-        service.config_test(provider)
+
+        await service.config_test(provider)
 
 
 superdesk.workflow_state(CONTENT_STATE.INGESTED)

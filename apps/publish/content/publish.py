@@ -9,6 +9,8 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 import logging
+
+from superdesk.flask import request
 from superdesk.errors import SuperdeskApiError
 from superdesk.metadata.item import (
     CONTENT_TYPE,
@@ -24,10 +26,10 @@ from superdesk.metadata.item import (
 from apps.archive.common import set_sign_off, ITEM_OPERATION
 from apps.archive.archive import update_word_count
 from superdesk.utc import utcnow
+from superdesk.publish_async.utils import get_residrefs
 
 from .common import BasePublishService, BasePublishResource, ITEM_PUBLISH
-from flask_babel import _
-from flask import request
+from quart_babel import gettext as _
 
 logger = logging.getLogger(__name__)
 
@@ -38,21 +40,31 @@ class ArchivePublishResource(BasePublishResource):
 
 
 class ArchivePublishService(BasePublishService):
+    """
+    Handles publishing and scheduling operations for archive items.
+
+    Set's the ``_state`` field to ``published``.
+
+    :raises:
+        - :class:`superdesk.errors.SuperdeskApiError.badRequestError`
+            If the item is package and contains no items.
+    """
+
     publish_type = "publish"
     published_state = "published"
     item_operation = ITEM_PUBLISH
 
-    def _validate(self, original, updates):
-        super()._validate(original, updates)
+    async def _validate(self, original, updates):
+        await super()._validate(original, updates)
         if original[ITEM_TYPE] == CONTENT_TYPE.COMPOSITE:
-            items = self.package_service.get_residrefs(original)
+            items = get_residrefs(original)
 
             if len(items) == 0 and self.publish_type == ITEM_PUBLISH:
                 raise SuperdeskApiError.badRequestError(_("Empty package cannot be published!"))
 
-    def on_update(self, updates, original):
+    async def on_update_async(self, updates, original):
         updates[ITEM_OPERATION] = self.item_operation
-        super().on_update(updates, original)
+        await super().on_update_async(updates, original)
 
         if not original.get("firstpublished"):
             if updates.get(SCHEDULE_SETTINGS) and updates[SCHEDULE_SETTINGS].get("utc_publish_schedule"):

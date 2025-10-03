@@ -13,8 +13,8 @@ from apps.auth import AuthResource
 from .reset_password import ResetPasswordService, ResetPasswordResource, ActiveTokensResource
 import superdesk
 from .db import DbAuthService
-from .commands import CreateUserCommand, HashUserPasswordsCommand  # noqa
-from superdesk.services import BaseService
+from .commands import create_user_command, cli_users_hash_passwords  # noqa
+from superdesk.eve_async import AsyncBaseService
 from apps.auth.db.change_password import ChangePasswordService, ChangePasswordResource
 
 
@@ -32,7 +32,7 @@ def init_app(app) -> None:
     ChangePasswordResource(endpoint_name, app=app, service=service)
 
     endpoint_name = "active_tokens"
-    service = BaseService(endpoint_name, backend=superdesk.get_backend())
+    service = AsyncBaseService(endpoint_name, backend=superdesk.get_backend())
     ActiveTokensResource(endpoint_name, app=app, service=service)
 
 

@@ -13,7 +13,7 @@ import arrow
 import datetime
 import logging
 
-from flask import current_app as app
+from superdesk.core import get_current_app, get_app_config
 from superdesk import etree as sd_etree, get_resource_service
 from superdesk.errors import ParserError
 from superdesk.io.registry import register_feed_parser
@@ -56,7 +56,7 @@ class NewsMLTwoFeedParser(XMLFeedParser):
     def can_parse(self, xml):
         return any([xml.tag.endswith(tag) for tag in ["newsMessage", "newsItem", "packageItem"]])
 
-    def parse(self, xml, provider=None):
+    async def parse(self, xml, provider=None):
         self.root = xml
         items = []
         try:
@@ -73,12 +73,12 @@ class NewsMLTwoFeedParser(XMLFeedParser):
                     items.append(item)
             return items
         except Exception as ex:
-            raise ParserError.newsmlTwoParserError(ex, provider)
+            raise await ParserError.newsmlTwoParserError(ex, provider).send_notifications()
 
     def parse_item(self, tree):
         # config is not accessible during __init__, so we check it here
         if self.__class__.missing_voc is None:
-            self.__class__.missing_voc = app.config.get("QCODE_MISSING_VOC", "continue")
+            self.__class__.missing_voc = get_app_config("QCODE_MISSING_VOC", "continue")
             if self.__class__.missing_voc not in ("reject", "create", "continue"):
                 logger.warning(
                     'Bad QCODE_MISSING_VOC value ({value}) using default ("continue")'.format(value=self.missing_voc)
@@ -220,6 +220,7 @@ class NewsMLTwoFeedParser(XMLFeedParser):
     def parse_content_subject(self, tree, item):
         """Parse subj type subjects into subject list."""
         item["subject"] = []
+        app = get_current_app()
         for subject_elt in tree.findall(self.qname("subject")):
             qcode_parts = subject_elt.get("qcode", "").split(":")
             if len(qcode_parts) == 2 and qcode_parts[0] in self.SUBJ_QCODE_PREFIXES:
@@ -402,6 +403,7 @@ class NewsMLTwoFeedParser(XMLFeedParser):
         :raise ValueError: value is rejected
         """
         vocabularies_service = get_resource_service("vocabularies")
+        # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
         voc = vocabularies_service.find_one(req=None, _id=voc_id)
         create = False
         if voc is None:
@@ -439,8 +441,10 @@ class NewsMLTwoFeedParser(XMLFeedParser):
 
         items.append({"is_active": True, "name": name, "qcode": qcode})
         if create:
+            # TODO-ASYNC: Convert to use ``post_async``, when upgrading this module
             vocabularies_service.post([voc])
         else:
+            # TODO-ASYNC: Convert to use ``put_async``, when upgrading this module
             vocabularies_service.put(voc_id, voc)
         return name
 

@@ -8,13 +8,17 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
-import superdesk
-from flask import current_app as app
+import click
+
+from superdesk.core import get_config, get_current_app, json
 from superdesk import get_resource_service
+from superdesk.commands import cli
 from superdesk.errors import ProviderError
 
 
-class AddProvider(superdesk.Command):
+@cli.command("ingest:provider")
+@click.option("--provider", "-p", required=True)
+async def cli_add_provider(provider: str):
     """Add ingest provider.
 
     Example:
@@ -28,29 +32,22 @@ class AddProvider(superdesk.Command):
 
     """
 
-    option_list = {
-        superdesk.Option("--provider", "-p", dest="provider", required=True),
-    }
+    data = {}
+    try:
+        data = json.loads(provider)
+        data.setdefault("content_expiry", get_config(int, "INGEST_EXPIRY_MINUTES"))
 
-    def run(self, provider):
-        try:
-            data = {}
-            data = superdesk.json.loads(provider)
-            data.setdefault("content_expiry", app.config["INGEST_EXPIRY_MINUTES"])
+        app = get_current_app()
+        validator = app.validator(get_config(dict, "DOMAIN")["ingest_providers"]["schema"], "ingest_providers")
+        validation = validator.validate(data)
 
-            validator = app.validator(app.config["DOMAIN"]["ingest_providers"]["schema"], "ingest_providers")
-            validation = validator.validate(data)
-
-            if validation:
-                get_resource_service("ingest_providers").post([data])
-                return data
-            else:
-                ex = Exception(
-                    "Failed to add Provider as the data provided is invalid. Errors: {}".format(str(validator.errors))
-                )
-                raise ProviderError.providerAddError(exception=ex, provider=data)
-        except Exception as ex:
-            raise ProviderError.providerAddError(ex, data)
-
-
-superdesk.command("ingest:provider", AddProvider())
+        if validation:
+            await get_resource_service("ingest_providers").post_async([data])
+            return data
+        else:
+            ex = Exception(
+                "Failed to add Provider as the data provided is invalid. Errors: {}".format(str(validator.errors))
+            )
+            raise await ProviderError.providerAddError(exception=ex, provider=data).send_notifications()
+    except Exception as ex:
+        raise await ProviderError.providerAddError(ex, data).send_notifications()

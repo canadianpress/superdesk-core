@@ -10,24 +10,23 @@
 
 import logging
 
-from flask_babel import _
-from eve.utils import config
+from quart_babel import gettext as _
 
+from superdesk.eve_async.service import AsyncBaseService
+from superdesk.resource_fields import ID_FIELD
 from apps.search_providers import allowed_search_providers
 from superdesk.errors import SuperdeskApiError
-from superdesk.services import BaseService
 from superdesk.utils import ListCursor
 from superdesk.users.services import current_user_has_item_privilege
 
 logger = logging.getLogger(__name__)
 
 
-class SearchProviderService(BaseService):
-    def get(self, req, lookup):
+class SearchProviderService(AsyncBaseService):
+    async def get_async(self, req, lookup):
         """
         Overriding to filter out the providers if they haven't been registered with the application.
         """
-
         providers = list(super().get(req, lookup))
         filtered_providers = []
 
@@ -44,32 +43,32 @@ class SearchProviderService(BaseService):
 
         return ListCursor(filtered_providers)
 
-    def find_one(self, req, **lookup):
+    async def find_one_async(self, req, **lookup):
         """
         Overriding to filter out the providers if they haven't been registered with the application.
         """
 
-        provider = super().find_one(req, **lookup)
+        provider = await super().find_one_async(req, **lookup)
         return provider if provider and provider["search_provider"] in allowed_search_providers else None
 
-    def on_created(self, docs):
+    async def on_created_async(self, docs):
         for doc in docs:
             if doc.get("is_default"):
-                self.find_and_modify(
-                    query={"$and": [{"_id": {"$ne": doc[config.ID_FIELD]}}, {"is_default": True}]},
+                await self.find_and_modify_async(
+                    query={"$and": [{"_id": {"$ne": doc[ID_FIELD]}}, {"is_default": True}]},
                     update={"$set": {"is_default": False}},
                     upsert=False,
                 )
 
-    def on_updated(self, updates, original):
+    async def on_updated_async(self, updates, original):
         if updates.get("is_default"):
-            self.find_and_modify(
-                query={"$and": [{"_id": {"$ne": original[config.ID_FIELD]}}, {"is_default": True}]},
+            await self.find_and_modify_async(
+                query={"$and": [{"_id": {"$ne": original[ID_FIELD]}}, {"is_default": True}]},
                 update={"$set": {"is_default": False}},
                 upsert=False,
             )
 
-    def on_delete(self, doc):
+    async def on_delete_async(self, doc):
         """
         Overriding to check if the search provider being requested to delete has been used to fetch items.
         """

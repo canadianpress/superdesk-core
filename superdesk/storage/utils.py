@@ -1,0 +1,77 @@
+import io
+import logging
+import mimetypes
+
+import magic
+from werkzeug import datastructures
+
+
+logger = logging.getLogger(__name__)
+
+
+def _get_mimetype_from_stream(content) -> str:
+    try:
+        stream = content
+        if isinstance(content, (bytes, str)):
+            bytes_buffer = content
+        else:
+            if isinstance(content, datastructures.FileStorage):
+                stream = content.stream
+            stream_type = type(stream)
+            try:
+                # we expect types with `io.BufferedIOBase` interface
+                # recommend using at least the first 16 KB, as less can produce incorrect identification
+                bytes_buffer = stream.read(16384)
+                stream.seek(0)
+            except AttributeError:
+                msg = "Not expected format for incoming binary stream: {}".format(stream_type)
+                logger.warning(msg)
+                raise Exception(msg)
+
+        # detect mimetype using wrapper around libmagic
+        determined_content_type = magic.from_buffer(bytes_buffer, mime=True)
+
+        # if 'application/octet-stream' is returned it means that libmagic was not able to
+        # detect mimetype precisely and as a fallback 'application/octet-stream' was returned.
+        # in this case we should try to detect a mimetype by filename
+        if determined_content_type == "application/octet-stream":
+            msg = "libmagic was not able to detect mimetype precisely"
+            raise Exception(msg)
+    except Exception as e:
+        logger.warning(e)
+        determined_content_type = "text/plain"
+
+    return determined_content_type or "text/plain"
+
+
+def get_mimetype(content, filename=None, content_type=None):
+    """
+    Return mimetype of the `content` and as a fallback using `filename`
+
+    :param content: binary stream
+    :type stream: `io.BytesIO` | `io.BufferedReader` | `io.BufferedIOBase` | `werkzeug.datastructures.FileStorage`
+    :param filename: filename
+    :type filename: str
+    :param content_type: expected content type, used as a fallback
+    :type filename: str
+    """
+
+    if content_type:
+        for media_type in ("image", "video", "audio"):
+            if content_type.startswith(media_type):
+                return content_type
+
+    determined_content_type = _get_mimetype_from_stream(content)
+
+    if determined_content_type == "text/plain" and filename:
+        # libmagic determined the type to be plain text from the stream
+        # fallback to using the filename to determine the type
+        determined_content_type = mimetypes.MimeTypes().guess_type(filename)[0]
+
+    if determined_content_type and determined_content_type != content_type:
+        logger.info(
+            "Content type '{}' was expected, but '{}' was determined".format(content_type, determined_content_type)
+        )
+        content_type = determined_content_type
+
+    return content_type

@@ -1,6 +1,6 @@
-import flask
+import quart
 
-from flask_babel import gettext
+from quart_babel import gettext
 
 from apps.auth import get_user_id
 from superdesk.types import Id
@@ -21,4 +21,4 @@ def validate_user_can_manage_availability(modified_user_id: Id) -> None:
     if current_user_has_privilege(USER_AVAILABILITY_WRITE):
         return
 
-    flask.abort(403, description=gettext("You can only modify your own availability settings."))
+    quart.abort(403, description=gettext("You can only modify your own availability settings."))

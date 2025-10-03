@@ -10,34 +10,33 @@
 
 from superdesk import get_resource_service
 from os.path import dirname, join
-from superdesk.tests import TestCase
+from superdesk.tests import TestCase, markers
 from superdesk.utc import utcnow
-from apps.auth.db.commands import CreateUserCommand, ImportUsersCommand
+from apps.auth.db.commands import create_user_command_handler, ImportUsersCommand
 
 
 class CreateUserCommandTestCase(TestCase):
-    def test_create_user_command(self):
+    async def test_create_user_command(self):
         if not self.app.config.get("LDAP_SERVER"):
             user = {"username": "foo", "password": "bar", "email": "baz", "password_changed_on": utcnow()}
-            cmd = CreateUserCommand()
-            cmd.run(user["username"], user["password"], user["email"], admin=True)
-            auth_user = get_resource_service("auth_db").authenticate(user)
+            await create_user_command_handler(user["username"], user["password"], user["email"], admin=True)
+            auth_user = await get_resource_service("auth_db").authenticate(user)
             self.assertEqual(auth_user["username"], user["username"])
 
-            cmd.run(user["username"], user["password"], user["email"], admin=True)
-            auth_user2 = get_resource_service("auth_db").authenticate(user)
+            await create_user_command_handler(user["username"], user["password"], user["email"], admin=True)
+            auth_user2 = await get_resource_service("auth_db").authenticate(user)
             self.assertEqual(auth_user2["username"], user["username"])
             self.assertEqual(auth_user2["_id"], auth_user["_id"])
 
-    def test_create_user_command_no_update(self):
+    async def test_create_user_command_no_update(self):
         if not self.app.config.get("LDAP_SERVER"):
             user = {"username": "foo", "password": "bar", "email": "baz", "password_changed_on": utcnow()}
-            cmd = CreateUserCommand()
-            cmd.run(user["username"], user["password"], user["email"], admin=True)
-            cmd.run(user["username"], "new_password", user["email"], admin=True)
-            get_resource_service("auth_db").authenticate(user)
+            cmd = create_user_command_handler
+            await cmd(user["username"], user["password"], user["email"], admin=True)
+            await cmd(user["username"], "new_password", user["email"], admin=True)
+            await get_resource_service("auth_db").authenticate(user)
 
-    def test_import_users(self):
+    async def test_import_users(self):
         """users:import is working with JSON files"""
         roles = [
             {"name": "Writer", "privileges": {}},
@@ -49,7 +48,7 @@ class CreateUserCommandTestCase(TestCase):
         cmd = ImportUsersCommand()
         fixtures_path = join(dirname(__file__), "fixtures")
         import_file = join(fixtures_path, "import_users_test.json")
-        cmd.run(None, import_file)
+        await cmd.run(None, import_file)
         users_service = get_resource_service("users")
         roles_services = get_resource_service("roles")
 
@@ -69,7 +68,7 @@ class CreateUserCommandTestCase(TestCase):
         found_user = users_service.find_one(req=None, username="invalid_unknown_role")
         self.assertIsNone(found_user)
 
-    def test_import_users_csv(self):
+    async def test_import_users_csv(self):
         """users:import is working with CSV files"""
         roles = [
             {"name": "Writer", "privileges": {}},
@@ -81,7 +80,7 @@ class CreateUserCommandTestCase(TestCase):
         cmd = ImportUsersCommand()
         fixtures_path = join(dirname(__file__), "fixtures")
         import_file = join(fixtures_path, "import_users_test.csv")
-        cmd.run(["username", "first_name", "last_name", "sign_off", "email", "role"], import_file)
+        await cmd.run(["username", "first_name", "last_name", "sign_off", "email", "role"], import_file)
         users_service = get_resource_service("users")
         roles_services = get_resource_service("roles")
 
@@ -95,7 +94,7 @@ class CreateUserCommandTestCase(TestCase):
         role_id = roles_services.find_one(req=None, name="Admin")["_id"]
         self.assertEqual(found_user["role"], role_id)
 
-    def test_import_users_no_activation_email(self):
+    async def test_import_users_no_activation_email(self):
         """users:import does not send activation email"""
         roles = [
             {"name": "Writer", "privileges": {}},
@@ -108,13 +107,12 @@ class CreateUserCommandTestCase(TestCase):
         fixtures_path = join(dirname(__file__), "fixtures")
         import_file = join(fixtures_path, "import_users_test.json")
 
-        with self.app.app_context():
-            with self.app.mail.record_messages() as outbox:
-                assert len(outbox) == 0
-                cmd.run(None, import_file)
-                assert len(outbox) == 0
+        with self.app.mail.record_messages() as outbox:
+            assert len(outbox) == 0
+            await cmd.run(None, import_file)
+            assert len(outbox) == 0
 
-    def test_import_users_activation_email(self):
+    async def test_import_users_activation_email(self):
         """users:import sends activation link"""
         roles = [
             {"name": "Writer", "privileges": {}},
@@ -127,8 +125,7 @@ class CreateUserCommandTestCase(TestCase):
         fixtures_path = join(dirname(__file__), "fixtures")
         import_file = join(fixtures_path, "import_users_test.json")
 
-        with self.app.app_context():
-            with self.app.mail.record_messages() as outbox:
-                assert len(outbox) == 0
-                cmd.run(None, import_file, activation_email=True)
-                assert len(outbox) == 2
+        with self.app.mail.record_messages() as outbox:
+            assert len(outbox) == 0
+            await cmd.run(None, import_file, activation_email=True)
+            assert len(outbox) == 2

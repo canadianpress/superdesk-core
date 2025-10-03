@@ -31,7 +31,7 @@ class PAParser(XMLFeedParser):
         except AttributeError:
             return False
 
-    def parse(self, xml, provider=None):
+    async def parse(self, xml, provider=None):
         try:
             item = {}
             self.root = xml

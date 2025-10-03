@@ -10,13 +10,20 @@
 
 
 import bson
-import logging
-from datetime import timedelta, timezone, datetime
 import pytz
-from flask import current_app as app
-from werkzeug.exceptions import HTTPException
-
+import logging
 import superdesk
+
+from datetime import timedelta, timezone, datetime
+from werkzeug.exceptions import HTTPException
+import click
+
+from superdesk.celery_app import CELERY_SERIALIZER_NAME
+from superdesk.core import get_app_config, get_current_app
+from superdesk.commands import cli
+from superdesk.resource_fields import ID_FIELD
+from superdesk.types import UsersResourceModel, UserTypeEnum, ContentFiltersResource
+
 from superdesk.activity import ACTIVITY_EVENT, notify_and_add_activity
 from superdesk.celery_app import celery
 from superdesk.celery_task_utils import get_lock_id
@@ -53,6 +60,23 @@ IDLE_TIME_DEFAULT = {"hours": 0, "minutes": 0}
 UPDATE_TTL = 1800
 
 logger = logging.getLogger(__name__)
+
+
+@cli.command("ingest:update")
+@click.option("--provider", "-p", "provider_name")
+@click.option("--sync", "-s", is_flag=True)
+async def cli_update_ingest(provider_name: str | None = None, sync=False):
+    """Runs update for ingest providers.
+
+    Example:
+    ::
+
+        $ python manage.py ingest:update
+        $ python manage.py ingest:update --provider=aap-demo
+
+    """
+
+    await UpdateIngest().run(provider_name, sync)
 
 
 def is_service_and_parser_registered(provider):
@@ -104,7 +128,7 @@ def is_not_expired(item, delta):
     return False
 
 
-def filter_expired_items(provider, items):
+async def filter_expired_items(provider, items):
     """Filter out expired items from the list of articles to be ingested.
 
     Filte both expired and `item['type'] not in provider['content_types']`.
@@ -130,7 +154,7 @@ def filter_expired_items(provider, items):
                 del provider["content_expiry"]
                 content_expiry = None
 
-        delta = timedelta(minutes=content_expiry or app.config["INGEST_EXPIRY_MINUTES"])
+        delta = timedelta(minutes=content_expiry or get_app_config("INGEST_EXPIRY_MINUTES"))
         filtered_items = [
             item
             for item in items
@@ -146,15 +170,15 @@ def filter_expired_items(provider, items):
 
         return filtered_items
     except Exception as ex:
-        raise ProviderError.providerFilterExpiredContentError(ex, provider)
+        raise await ProviderError.providerFilterExpiredContentError(ex, provider).send_notifications()
 
 
-def get_provider_rule_set(provider):
+async def get_provider_rule_set(provider):
     if provider.get("rule_set"):
-        return superdesk.get_resource_service("rule_sets").find_one(_id=provider["rule_set"], req=None)
+        return await superdesk.get_resource_service("rule_sets").find_one_async(_id=provider["rule_set"], req=None)
 
 
-def get_provider_routing_scheme(provider):
+async def get_provider_routing_scheme(provider):
     """Returns the ingests provider's routing scheme configuration.
 
     If provider has a routing scheme defined (i.e. scheme ID is not None), the
@@ -173,9 +197,9 @@ def get_provider_routing_scheme(provider):
         return None
 
     schemes_service = superdesk.get_resource_service("routing_schemes")
-    filters_service = superdesk.get_resource_service("content_filters")
+    filters_service = ContentFiltersResource.get_service()
 
-    scheme = schemes_service.find_one(_id=provider["routing_scheme"], req=None)
+    scheme = await schemes_service.find_one_async(_id=provider["routing_scheme"], req=None)
     if not scheme:
         return None
 
@@ -184,7 +208,7 @@ def get_provider_routing_scheme(provider):
     rules_filters = ((rule, str(rule["filter"])) for rule in scheme["rules"] if rule.get("filter"))
 
     for rule, filter_id in rules_filters:
-        content_filter = filters_service.find_one(_id=filter_id, req=None)
+        content_filter = await filters_service.find_by_id_raw(filter_id)
         rule["filter"] = content_filter
 
     return scheme
@@ -221,7 +245,7 @@ def get_is_idle(provider):
 
 
 def get_task_id(provider):
-    return "update-ingest-{0}-{1}".format(provider.get("name"), provider.get(superdesk.config.ID_FIELD))
+    return "update-ingest-{0}-{1}".format(provider.get("name"), provider.get(ID_FIELD))
 
 
 def has_system_renditions(item):
@@ -235,25 +259,12 @@ def update_assoc_renditions(assoc, ingested):
             assoc["renditions"][key] = val
 
 
-class UpdateIngest(superdesk.Command):
-    """Runs update for ingest providers.
-
-    Example:
-    ::
-
-        $ python manage.py ingest:update
-        $ python manage.py ingest:update --provider=aap-demo
-
-    """
-
-    option_list = (
-        superdesk.Option("--provider", "-p", dest="provider_name"),
-        superdesk.Option("--sync", "-s", dest="sync", action="store_true"),
-    )
-
-    def run(self, provider_name=None, sync=False):
+class UpdateIngest:
+    async def run(self, provider_name=None, sync=False):
         lookup = {} if not provider_name else {"name": provider_name}
-        for provider in superdesk.get_resource_service("ingest_providers").get(req=None, lookup=lookup):
+        async for provider in await superdesk.get_resource_service("ingest_providers").get_async(
+            req=None, lookup=lookup
+        ):
             if (
                 not is_closed(provider)
                 and is_service_and_parser_registered(provider)
@@ -261,15 +272,17 @@ class UpdateIngest(superdesk.Command):
             ):
                 kwargs = {
                     "provider": provider,
-                    "rule_set": get_provider_rule_set(provider),
-                    "routing_scheme": get_provider_routing_scheme(provider),
+                    "rule_set": await get_provider_rule_set(provider),
+                    "routing_scheme": await get_provider_routing_scheme(provider),
                     "sync": sync,
                 }
 
                 if sync:
-                    update_provider.apply(kwargs=kwargs)
+                    await update_provider.apply(kwargs=kwargs)
                 else:
-                    update_provider.apply_async(expires=get_task_ttl(provider), kwargs=kwargs, serializer="eve/json")
+                    await update_provider.apply_async(
+                        expires=get_task_ttl(provider), kwargs=kwargs, serializer=CELERY_SERIALIZER_NAME
+                    )
 
 
 def update_last_item_updated(update, items):
@@ -282,7 +295,7 @@ def update_last_item_updated(update, items):
 
 
 @celery.task(soft_time_limit=UPDATE_TTL)
-def update_provider(provider, rule_set=None, routing_scheme=None, sync=False):
+async def update_provider(provider, rule_set=None, routing_scheme=None, sync=False):
     """Fetch items from ingest provider, ingest them into Superdesk and update the provider.
 
     :param provider: Ingest Provider data
@@ -290,7 +303,7 @@ def update_provider(provider, rule_set=None, routing_scheme=None, sync=False):
     :param routing_scheme: Routing Scheme if one is associated with Ingest Provider.
     :param sync: Running in sync mode from cli.
     """
-    lock_name = get_lock_id("ingest", provider["name"], provider[superdesk.config.ID_FIELD])
+    lock_name = get_lock_id("ingest", provider["name"], provider[ID_FIELD])
 
     if not lock(lock_name, expire=UPDATE_TTL + 10):
         if sync:
@@ -304,34 +317,32 @@ def update_provider(provider, rule_set=None, routing_scheme=None, sync=False):
         if sync:
             provider[LAST_UPDATED] = utcnow() - timedelta(days=9999)  # import everything again
 
-        generator = feeding_service.update(provider, update)
-        if isinstance(generator, list):
-            generator = (items for items in generator)
+        generator = await feeding_service.update(provider, update)
         failed = None
         while True:
             try:
                 if not touch(lock_name, expire=UPDATE_TTL):
-                    logger.warning("lock expired while updating provider %s", provider[superdesk.config.ID_FIELD])
+                    logger.warning("lock expired while updating provider %s", provider[ID_FIELD])
                     return
-                items = generator.send(failed)
-                failed = ingest_items(items, provider, feeding_service, rule_set, routing_scheme)
+                items = await generator.asend(failed)
+                failed = await ingest_items(items, provider, feeding_service, rule_set, routing_scheme)
                 update_last_item_updated(update, items)
 
                 if not update.get(LAST_ITEM_ARRIVED) or update[LAST_ITEM_ARRIVED] < datetime.now(tz=pytz.utc):
                     update[LAST_ITEM_ARRIVED] = datetime.now(tz=pytz.utc)
 
-            except StopIteration:
+            except StopAsyncIteration:
                 break
 
         # Some Feeding Services update the collection and by this time the _etag might have been changed.
         # So it's necessary to fetch it once again. Otherwise, OriginalChangedError is raised.
         ingest_provider_service = superdesk.get_resource_service("ingest_providers")
-        provider = ingest_provider_service.find_one(req=None, _id=provider[superdesk.config.ID_FIELD])
-        ingest_provider_service.system_update(provider[superdesk.config.ID_FIELD], update, provider)
+        provider = await ingest_provider_service.find_one_async(req=None, _id=provider[ID_FIELD])
+        await ingest_provider_service.system_update_async(provider[ID_FIELD], update, provider)
 
         if LAST_ITEM_UPDATE not in update and get_is_idle(provider):
-            admins = superdesk.get_resource_service("users").get_users_by_user_type("administrator")
-            notify_and_add_activity(
+            admins = [user.to_dict() for user in await UsersResourceModel.get_by_user_type(UserTypeEnum.ADMINISTRATOR)]
+            await notify_and_add_activity(
                 ACTIVITY_EVENT,
                 "Provider {{name}} has gone strangely quiet. Last activity was on {{last}}",
                 resource="ingest_providers",
@@ -340,20 +351,22 @@ def update_provider(provider, rule_set=None, routing_scheme=None, sync=False):
                 last=provider[LAST_ITEM_UPDATE].replace(tzinfo=timezone.utc).astimezone(tz=None).strftime("%c"),
             )
 
-        logger.info("Provider {0} updated".format(provider[superdesk.config.ID_FIELD]))
+        logger.info("Provider {0} updated".format(provider[ID_FIELD]))
 
         if LAST_ITEM_UPDATE in update:  # Only push a notification if there has been an update
-            push_notification("ingest:update", provider_id=str(provider[superdesk.config.ID_FIELD]))
+            push_notification("ingest:update", provider_id=str(provider[ID_FIELD]))
     except Exception as e:
         logger.error("Failed to ingest file: {error}".format(error=e))
-        raise IngestFileError(3000, e, provider)
+        raise await IngestFileError(3000, e, provider).send_notifications()
     finally:
         unlock(lock_name)
 
 
-def process_anpa_category(item, provider):
+async def _process_anpa_category(item, provider):
     try:
-        anpa_categories = superdesk.get_resource_service("vocabularies").find_one(req=None, _id="categories")
+        anpa_categories = await superdesk.get_resource_service("vocabularies").find_one_async(
+            req=None, _id="categories"
+        )
         if anpa_categories:
             for item_category in item["anpa_category"]:
                 mapped_category = [
@@ -375,10 +388,10 @@ def process_anpa_category(item, provider):
                             set_subject_name_translation(item_category, item["language"])
 
     except Exception as ex:
-        raise ProviderError.anpaError(ex, provider)
+        raise await ProviderError.anpaError(ex, provider).send_notifications()
 
 
-def derive_category(item, provider):
+async def _derive_category(item, provider):
     """Assuming that the item has at least one itpc subject use the vocabulary map to derive an anpa category.
 
     :param item:
@@ -386,7 +399,9 @@ def derive_category(item, provider):
     """
     try:
         categories = []
-        subject_map = superdesk.get_resource_service("vocabularies").find_one(req=None, _id="iptc_category_map")
+        subject_map = await superdesk.get_resource_service("vocabularies").find_one_async(
+            req=None, _id="iptc_category_map"
+        )
         if subject_map:
             for entry in (map_entry for map_entry in subject_map["items"] if map_entry["is_active"]):
                 for subject in item.get("subject", []):
@@ -395,12 +410,12 @@ def derive_category(item, provider):
                             categories.append({"qcode": entry["category"]})
             if len(categories):
                 item["anpa_category"] = categories
-                process_anpa_category(item, provider)
+                await _process_anpa_category(item, provider)
     except Exception as ex:
         logger.exception(ex)
 
 
-def process_iptc_codes(item, provider):
+async def process_iptc_codes(item, provider):
     """Ensures that the higher level IPTC codes are present by inserting them if missing.
 
     For example if given 15039001 (Formula One) make sure that 15039000 (motor racing) and 15000000 (sport)
@@ -435,17 +450,17 @@ def process_iptc_codes(item, provider):
                         logger.warning("missing qcode in subject_codes: {qcode}".format(qcode=mid_qcode))
                         continue
     except Exception as ex:
-        raise ProviderError.iptcError(ex, provider)
+        raise await ProviderError.iptcError(ex, provider).send_notifications()
 
 
-def derive_subject(item):
+async def _derive_subject(item):
     """Try to derive a subject using the anpa category vocabulary.
 
     :param item:
     :return:
     """
     try:
-        category_map = superdesk.get_resource_service("vocabularies").find_one(req=None, _id="categories")
+        category_map = await superdesk.get_resource_service("vocabularies").find_one_async(req=None, _id="categories")
         if category_map:
             for cat in item["anpa_category"]:
                 map_entry = next(
@@ -460,7 +475,7 @@ def derive_subject(item):
         logger.exception(ex)
 
 
-def apply_rule_set(item, provider, rule_set=None):
+async def apply_rule_set(item, provider, rule_set=None):
     """Applies rules set on the item to be ingested into the system.
 
     If there's no rule set then the item will
@@ -472,7 +487,9 @@ def apply_rule_set(item, provider, rule_set=None):
     """
     try:
         if rule_set is None and provider.get("rule_set") is not None:
-            rule_set = superdesk.get_resource_service("rule_sets").find_one(_id=provider["rule_set"], req=None)
+            rule_set = await superdesk.get_resource_service("rule_sets").find_one_async(
+                _id=provider["rule_set"], req=None
+            )
 
         if rule_set and "body_html" in item:
             body = item["body_html"]
@@ -484,7 +501,7 @@ def apply_rule_set(item, provider, rule_set=None):
 
         return item
     except Exception as ex:
-        raise ProviderError.ruleError(ex, provider)
+        raise await ProviderError.ruleError(ex, provider).send_notifications()
 
 
 def ingest_cancel(item, feeding_service):
@@ -506,8 +523,8 @@ def ingest_cancel(item, feeding_service):
         ingest_service.patch(relative["_id"], update)
 
 
-def ingest_items(items, provider, feeding_service, rule_set=None, routing_scheme=None):
-    all_items = filter_expired_items(provider, items)
+async def ingest_items(items, provider, feeding_service, rule_set=None, routing_scheme=None):
+    all_items = await filter_expired_items(provider, items)
     items_dict = {doc[GUID_FIELD]: doc for doc in all_items}
     items_in_package = []
     failed_items = set()
@@ -518,7 +535,7 @@ def ingest_items(items, provider, feeding_service, rule_set=None, routing_scheme
         ]
 
     for item in [doc for doc in all_items if doc.get(ITEM_TYPE) != CONTENT_TYPE.COMPOSITE]:
-        ingested, ids = ingest_item(
+        ingested, ids = await ingest_item(
             item,
             provider,
             feeding_service,
@@ -541,10 +558,10 @@ def ingest_items(items, provider, feeding_service, rule_set=None, routing_scheme
                 ref.setdefault("renditions", itemRendition)
             ref[GUID_FIELD] = ref["residRef"]
             if items_dict.get(ref["residRef"]):
-                ref["residRef"] = items_dict.get(ref["residRef"], {}).get(superdesk.config.ID_FIELD)
+                ref["residRef"] = items_dict.get(ref["residRef"], {}).get(ID_FIELD)
         if item[GUID_FIELD] in failed_items:
             continue
-        ingested, ids = ingest_item(item, provider, feeding_service, rule_set, routing_scheme)
+        ingested, ids = await ingest_item(item, provider, feeding_service, rule_set, routing_scheme)
         if ingested:
             created_ids = created_ids + ids
         else:
@@ -556,13 +573,14 @@ def ingest_items(items, provider, feeding_service, rule_set=None, routing_scheme
         ingest_collection = feeding_service.service if hasattr(feeding_service, "service") else "ingest"
     ingest_service = superdesk.get_resource_service(ingest_collection)
     updated_items = ingest_service.find({"_id": {"$in": created_ids}}, max_results=len(created_ids))
+    app = get_current_app()
     app.data._search_backend(ingest_collection).bulk_insert(ingest_collection, list(updated_items))
     if failed_items:
         logger.error("Failed to ingest the following items: %s", failed_items)
     return failed_items
 
 
-def ingest_item(item, provider, feeding_service, rule_set=None, routing_scheme=None, expiry=None):
+async def ingest_item(item, provider, feeding_service, rule_set=None, routing_scheme=None, expiry=None):
     items_ids = []
     try:
         ingest_collection = get_ingest_collection(feeding_service, item)
@@ -579,11 +597,11 @@ def ingest_item(item, provider, feeding_service, rule_set=None, routing_scheme=N
             _ingest_cancel = ingest_cancel
 
         # determine if we already have this item
-        old_item = ingest_service.find_one(guid=item[GUID_FIELD], req=None)
+        old_item = await ingest_service.find_one_async(guid=item[GUID_FIELD], req=None)
 
         if not old_item:
-            item.setdefault(superdesk.config.ID_FIELD, generate_guid(type=GUID_NEWSML))
-            item[FAMILY_ID] = item[superdesk.config.ID_FIELD]
+            item.setdefault(ID_FIELD, generate_guid(type=GUID_NEWSML))
+            item[FAMILY_ID] = item[ID_FIELD]
         elif provider.get("disable_item_updates", False):
             logger.warning(
                 f"Resource '{ingest_collection}' "
@@ -595,7 +613,7 @@ def ingest_item(item, provider, feeding_service, rule_set=None, routing_scheme=N
             logger.info(f"Resource '{ingest_collection}' " f"item '{item[GUID_FIELD]}' should not be updated")
             return False, []
 
-        item["ingest_provider"] = str(provider[superdesk.config.ID_FIELD])
+        item["ingest_provider"] = str(provider[ID_FIELD])
         item.setdefault("source", provider.get("source", ""))
         item.setdefault("uri", item[GUID_FIELD])  # keep it as original guid
 
@@ -604,7 +622,9 @@ def ingest_item(item, provider, feeding_service, rule_set=None, routing_scheme=N
                 item["profile"] = bson.ObjectId(item["profile"])
             except bson.errors.InvalidId:
                 pass
-            profile = superdesk.get_resource_service("content_types").find_one(req=None, _id=item["profile"])
+            profile = await superdesk.get_resource_service("content_types").find_one_async(
+                req=None, _id=item["profile"]
+            )
             if not profile:  # unknown profile
                 item.pop("profile")
 
@@ -612,18 +632,18 @@ def ingest_item(item, provider, feeding_service, rule_set=None, routing_scheme=N
         set_expiry(item, provider, parent_expiry=expiry)
 
         if "anpa_category" in item:
-            process_anpa_category(item, provider)
+            await _process_anpa_category(item, provider)
 
         if "subject" in item:
-            if not app.config.get("INGEST_SKIP_IPTC_CODES", False):
+            if not get_app_config("INGEST_SKIP_IPTC_CODES", False):
                 # FIXME: temporary fix for SDNTB-344, need to be removed once SDESK-439 is implemented
-                process_iptc_codes(item, provider)
+                await process_iptc_codes(item, provider)
             if "anpa_category" not in item:
-                derive_category(item, provider)
+                await _derive_category(item, provider)
         elif "anpa_category" in item:
-            derive_subject(item)
+            await _derive_subject(item)
 
-        apply_rule_set(item, provider, rule_set)
+        await apply_rule_set(item, provider, rule_set)
 
         if item.get("pubstatus", "") in [PUB_STATUS.CANCELED, "cancelled"]:  # Planning module uses "cancelled" value
             item[ITEM_STATE] = CONTENT_STATE.KILLED
@@ -633,7 +653,10 @@ def ingest_item(item, provider, feeding_service, rule_set=None, routing_scheme=N
         if rend:
             baseImageRend = rend.get("baseImage") or next(iter(rend.values()))
             if baseImageRend and not baseImageRend.get("media"):  # if there is media should be processed already
-                href = feeding_service.prepare_href(baseImageRend["href"], rend.get("mimetype"))
+                if hasattr(feeding_service, "prepare_href_async"):
+                    href = await feeding_service.prepare_href_async(baseImageRend["href"], rend.get("mimetype"))
+                else:
+                    href = feeding_service.prepare_href(baseImageRend["href"], rend.get("mimetype"))
                 update_renditions(item, href, old_item, feeding_service=feeding_service)
 
         # if the item has associated media
@@ -643,12 +666,12 @@ def ingest_item(item, provider, feeding_service, rule_set=None, routing_scheme=N
             guid = assoc.get("guid")
             assoc_name = assoc.get("headline") or assoc.get("slugline") or guid
             if guid:
-                ingested = ingest_service.find_one(req=None, guid=guid)
+                ingested = await ingest_service.find_one_async(req=None, guid=guid)
                 if ingested is not None:
                     logger.info("assoc ingested before %s", assoc_name)
                     assoc["_id"] = ingested["_id"]
                     # update expiry so assoc will stay as long as the item using it
-                    ingest_service.system_update(ingested["_id"], {"expiry": item["expiry"]}, ingested)
+                    await ingest_service.system_update_async(ingested["_id"], {"expiry": item["expiry"]}, ingested)
                     if _is_new_version(assoc, ingested) and assoc.get("renditions"):  # new version
                         logger.info("new assoc version - re-transfer renditions for %s", assoc_name)
                         try:
@@ -677,11 +700,11 @@ def ingest_item(item, provider, feeding_service, rule_set=None, routing_scheme=N
                                     name=assoc_name,
                                 ),
                             )
-                    status, ids = ingest_item(assoc, provider, feeding_service, rule_set, expiry=item["expiry"])
+                    status, ids = await ingest_item(assoc, provider, feeding_service, rule_set, expiry=item["expiry"])
                     if status:
                         assoc["_id"] = ids[0]
                         items_ids.extend(ids)
-                        ingested = ingest_service.find_one(req=None, _id=ids[0])
+                        ingested = await ingest_service.find_one_async(req=None, _id=ids[0])
                         update_assoc_renditions(assoc, ingested)
             elif assoc.get("residRef"):
                 item["associations"][key] = resolve_ref(assoc)
@@ -691,7 +714,7 @@ def ingest_item(item, provider, feeding_service, rule_set=None, routing_scheme=N
             new_version = _is_new_version(item, old_item)
             updates = deepcopy(item)
             if new_version:
-                ingest_service.patch_in_mongo(old_item[superdesk.config.ID_FIELD], updates, old_item)
+                await ingest_service.patch_in_mongo(old_item[ID_FIELD], updates, old_item)
                 item.update(old_item)
                 item.update(updates)
                 items_ids.append(item["_id"])
@@ -699,20 +722,25 @@ def ingest_item(item, provider, feeding_service, rule_set=None, routing_scheme=N
                 item.update(old_item)
         else:
             if item.get("ingest_provider_sequence") is None:
-                ingest_service.set_ingest_provider_sequence(item, provider)
+                if hasattr(ingest_service, "set_ingest_provider_sequence_async"):
+                    await ingest_service.set_ingest_provider_sequence_async(item, provider)
+                else:
+                    ingest_service.set_ingest_provider_sequence(item, provider)
             try:
-                items_ids.extend(ingest_service.post_in_mongo([item]))
+                items_ids.extend(await ingest_service.post_in_mongo([item]))
             except HTTPException as e:
                 logger.error("Exception while persisting item in %s collection: %s", ingest_collection, e)
                 raise e
 
         if routing_scheme and new_version:
-            routed = ingest_service.find_one(_id=item[superdesk.config.ID_FIELD], req=None)
-            superdesk.get_resource_service("routing_schemes").apply_routing_scheme(routed, provider, routing_scheme)
+            routed = await ingest_service.find_one_async(_id=item[ID_FIELD], req=None)
+            await superdesk.get_resource_service("routing_schemes").apply_routing_scheme(
+                routed, provider, routing_scheme
+            )
 
     except Exception as ex:
         logger.exception(ex)
-        ProviderError.ingestItemError(ex, provider, item=item)
+        await ProviderError.ingestItemError(ex, provider, item=item).send_notifications()
         return False, []
     return True, items_ids
 
@@ -775,7 +803,8 @@ def set_expiry(item, provider, parent_expiry=None):
         expiry_offset = item["dates"]["end"]
 
     item.setdefault(
-        "expiry", get_expiry_date(provider.get("content_expiry") or app.config["INGEST_EXPIRY_MINUTES"], expiry_offset)
+        "expiry",
+        get_expiry_date(provider.get("content_expiry") or get_app_config("INGEST_EXPIRY_MINUTES"), expiry_offset),
     )
 
 
@@ -784,6 +813,3 @@ def set_subject_name_translation(subject, language) -> None:
         subject["name"] = subject["translations"]["name"][language]
     except (KeyError, TypeError):
         pass
-
-
-superdesk.command("ingest:update", UpdateIngest())

@@ -8,14 +8,18 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
-from flask import Flask
 from unittest import mock
 
-from content_api.tests import ApiTestCase
+from superdesk.tests import AsyncQuartTestCase
 
 
-class PackagesServiceTestCase(ApiTestCase):
+class PackagesServiceTestCase(AsyncQuartTestCase):
     """Base class for the `packages` service tests."""
+
+    app_config = {
+        "CONTENTAPI_URL": "http://content_api.com",
+        "URLS": {"items": "items_endpoint", "packages": "packages_endpoint"},
+    }
 
     def _get_target_class(self):
         """Return the class under test.
@@ -38,24 +42,13 @@ class PackagesServiceTestCase(ApiTestCase):
 class OnFetchedItemMethodTestCase(PackagesServiceTestCase):
     """Tests for the on_fetched_item() method."""
 
-    def setUp(self):
-        super().setUp()
-
-        self.app = Flask(__name__)
-        self.app.config["CONTENTAPI_URL"] = "http://content_api.com"
-        self.app.config["URLS"] = {"items": "items_endpoint", "packages": "packages_endpoint"}
-
-        self.app_context = self.app.app_context()
-        self.app_context.push()
-        self.addCleanup(self.app_context.pop)
-
-    def test_invokes_superclass_method_with_correct_args(self, super_fetched):
+    async def test_invokes_superclass_method_with_correct_args(self, super_fetched):
         document = {"_id": "item:XYZ"}
         instance = self._make_one(datasource="packages")
         instance.on_fetched_item(document)
         super_fetched.assert_called_with(document)
 
-    def test_sets_uri_field_on_referenced_items(self, super_fetched):
+    async def test_sets_uri_field_on_referenced_items(self, super_fetched):
         document = {"_id": "item:XYZ", "associations": {"main": {"type": "picture", "_id": "img:123"}}}
 
         instance = self._make_one(datasource="packages")
@@ -64,7 +57,7 @@ class OnFetchedItemMethodTestCase(PackagesServiceTestCase):
         expected_assoc = {"main": {"type": "picture", "uri": "http://content_api.com/items_endpoint/img%3A123"}}
         self.assertEqual(document.get("associations"), expected_assoc)
 
-    def test_sets_uri_field_on_referenced_packages(self, super_fetched):
+    async def test_sets_uri_field_on_referenced_packages(self, super_fetched):
         document = {"_id": "item:XYZ", "associations": {"story_object": {"type": "composite", "_id": "pkg:456"}}}
 
         instance = self._make_one(datasource="packages")
@@ -80,24 +73,13 @@ class OnFetchedItemMethodTestCase(PackagesServiceTestCase):
 class OnFetchedMethodTestCase(PackagesServiceTestCase):
     """Tests for the on_fetched() method."""
 
-    def setUp(self):
-        super().setUp()
-
-        self.app = Flask(__name__)
-        self.app.config["CONTENTAPI_URL"] = "http://content_api.com"
-        self.app.config["URLS"] = {"items": "items_endpoint", "packages": "packages_endpoint"}
-
-        self.app_context = self.app.app_context()
-        self.app_context.push()
-        self.addCleanup(self.app_context.pop)
-
-    def test_invokes_superclass_method_with_correct_args(self, super_fetched):
+    async def test_invokes_superclass_method_with_correct_args(self, super_fetched):
         result = {"_items": []}
         instance = self._make_one(datasource="packages")
         instance.on_fetched(result)
         super_fetched.assert_called_with(result)
 
-    def test_sets_uri_field_on_objects_referenced_by_fetched_packages(self, super_fetched):
+    async def test_sets_uri_field_on_objects_referenced_by_fetched_packages(self, super_fetched):
         result = {
             "_items": [
                 {"_id": "pkg:ABC", "associations": {"main_picture": {"type": "picture", "_id": "img:123"}}},

@@ -1,6 +1,7 @@
 import logging
-from flask import current_app as app
-from flask_babel import lazy_gettext
+
+from quart_babel import lazy_gettext
+from superdesk.core import get_app_config
 from superdesk import get_resource_service
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ def get_default_content_template(item, **kwargs):
         return
 
     if desk is None:
+        # TODO-ASYNC[desks]: Use DesksResourceModel async service where when upgrading this module
         desk = get_resource_service("desks").find_one(req=None, _id=desk_id)
     if not desk:
         logger.warning('Can\'t find desk with id "{desk_id}"'.format(desk_id=desk_id))
@@ -30,6 +32,7 @@ def get_default_content_template(item, **kwargs):
     if not content_template_id:
         logger.warning("No default content template set for {desk_name}".format(desk_name=desk.get("name", desk_id)))
         return
+    # TODO-ASYNC[ContentTemplatesService]: Use find_one_async where when upgrading this module
     content_template = get_resource_service("content_templates").find_one(req=None, _id=content_template_id)
     if not content_template:
         logger.warning(
@@ -43,8 +46,8 @@ def get_default_content_template(item, **kwargs):
 
 
 def set_default_template_metadata(item, **kwargs):
-    fields_to_exclude = app.config.get("DEFAULT_TEMPLATE_METADATA_MACRO_EXCLUDE", [])
-    fields_to_override = app.config.get("DEFAULT_TEMPLATE_METADATA_MACRO_OVERRIDE", [])
+    fields_to_exclude = get_app_config("DEFAULT_TEMPLATE_METADATA_MACRO_EXCLUDE", [])
+    fields_to_override = get_app_config("DEFAULT_TEMPLATE_METADATA_MACRO_OVERRIDE", [])
 
     """Replace some metadata from default content template"""
 
@@ -54,6 +57,7 @@ def set_default_template_metadata(item, **kwargs):
 
     data = content_template["data"]
 
+    # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
     vocabularies = get_resource_service("vocabularies").get(req=None, lookup={"field_type": {"$exists": True}})
     for vocabulary in vocabularies:
         fields_to_exclude.append(vocabulary["_id"])

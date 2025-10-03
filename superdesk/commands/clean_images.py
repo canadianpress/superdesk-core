@@ -11,11 +11,14 @@
 
 import superdesk
 
-from flask import current_app as app
+from superdesk.core import get_app_config, get_current_app
 from superdesk.metadata.item import ASSOCIATIONS
 
+from .async_cli import cli
 
-class CleanImages(superdesk.Command):
+
+@cli.command("app:clean_images")
+async def cli_clean_images():
     """This command will remove all the images from the system which are not referenced by content.
 
     It checks the media type and calls the correspoinding function as s3 and mongo
@@ -28,8 +31,11 @@ class CleanImages(superdesk.Command):
         $ python manage.py app:clean_images
 
     """
+    await CleanImages().run()
 
-    def run(self):
+
+class CleanImages:
+    async def run(self):
         print("Starting image cleaning.")
         used_images = set()
         types = ["picture", "video", "audio"]
@@ -41,13 +47,15 @@ class CleanImages(superdesk.Command):
         archive_version_items = superdesk.get_resource_service("archive_versions").get_from_mongo(None, query)
         self.__add_existing_files(used_images, archive_version_items)
 
-        ingest_items = superdesk.get_resource_service("ingest").get_from_mongo(None, {"type": {"$in": types}})
+        ingest_items = await superdesk.get_resource_service("ingest").get_from_mongo_async(
+            None, {"type": {"$in": types}}
+        )
         self.__add_existing_files(used_images, ingest_items)
 
-        upload_items = superdesk.get_resource_service("upload").get_from_mongo(req=None, lookup={})
+        upload_items = await superdesk.get_resource_service("upload").get_from_mongo_async(req=None, lookup={})
         self.__add_existing_files(used_images, upload_items)
 
-        if app.config.get("LEGAL_ARCHIVE"):
+        if get_app_config("LEGAL_ARCHIVE"):
             legal_archive_items = superdesk.get_resource_service("legal_archive").get_from_mongo(None, query)
             self.__add_existing_files(used_images, legal_archive_items)
 
@@ -57,8 +65,7 @@ class CleanImages(superdesk.Command):
             self.__add_existing_files(used_images, legal_archive_version_items)
 
         print("Number of used files: ", len(used_images))
-
-        app.media.remove_unreferenced_files(used_images)
+        get_current_app().media.remove_unreferenced_files(used_images)
 
     def __add_existing_files(self, used_images, items):
         for item in items:
@@ -78,6 +85,3 @@ class CleanImages(superdesk.Command):
 
             for renditions in associations:
                 used_images.update([str(rend.get("media")) for rend in renditions.values() if rend.get("media")])
-
-
-superdesk.command("app:clean_images", CleanImages())

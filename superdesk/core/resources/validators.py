@@ -1,0 +1,311 @@
+# -*- coding: utf-8; -*-
+#
+# This file is part of Superdesk.
+#
+# Copyright 2024 Sourcefabric z.u. and contributors.
+#
+# For the full copyright and license information, please see the
+# AUTHORS and LICENSE files distributed with this source code, or
+# at https://www.sourcefabric.org/superdesk/license
+
+from typing import Callable, Any, Awaitable, Dict, cast
+import re
+import logging
+
+from quart_babel import gettext
+from pydantic import AfterValidator, ValidationError
+from pydantic_core import PydanticCustomError
+from bson import ObjectId
+
+
+from superdesk.core.app import get_app_config
+
+logger = logging.getLogger(__name__)
+
+
+EmailValueType = str | list[str] | None
+
+
+def validate_email(error_string: str | None = None, multi: bool = False) -> AfterValidator:
+    """Validates that the value is a valid email address
+
+    :param error_string: An optional custom error string if validation fails
+    :param multi: If True will convert the string to a list (comma separated)
+    """
+
+    def _validate_email(value: EmailValueType, check_multi: bool | None = None) -> EmailValueType:
+        if check_multi is None:
+            check_multi = multi
+
+        if value is None:
+            return None
+        elif check_multi or isinstance(value, list):
+            for email in value.split(",") if isinstance(value, str) else value:
+                _validate_email(email, False)
+        elif not re.match(".+@.+", value, re.IGNORECASE):
+            # it's tricky to write proper regex for email validation, so we
+            # should use simple one, or use libraries like
+            # - https://pypi.python.org/pypi/email_validator
+            # - https://pypi.python.org/pypi/pyIsEmail
+            # given that admins are usually create users, not users by themself,
+            # probably just check for @ is enough
+            # https://davidcel.is/posts/stop-validating-email-addresses-with-regex/
+            raise PydanticCustomError("email", str(error_string) if error_string else gettext("Invalid email address"))
+        return value
+
+    return AfterValidator(_validate_email)
+
+
+MinMaxValueType = str | int | float | list[str] | list[int] | list[float] | None
+
+
+def validate_minlength(
+    min_length: int, validate_list_elements: bool = False, error_string: str | None = None
+) -> AfterValidator:
+    """Validates that the value has a minimum length
+
+    :param min_length: The minimum length of the value
+    :param validate_list_elements: Whether to validate the elements in the list or the list length
+    :param error_string: An optional custom error string if validation fails
+    """
+
+    def _validate_minlength(value: MinMaxValueType) -> MinMaxValueType:
+        if isinstance(value, list) and validate_list_elements:
+            for val in value:
+                _validate_minlength(val)
+        elif isinstance(value, (type(""), list)):
+            if len(value) < min_length:
+                raise PydanticCustomError("minlength", str(error_string) if error_string else gettext("Not enough"))
+        elif isinstance(value, (int, float)):
+            if value < min_length:
+                raise PydanticCustomError("min_length", str(error_string) if error_string else gettext("Too short"))
+        return value
+
+    return AfterValidator(_validate_minlength)
+
+
+def validate_maxlength(
+    max_length: int, validate_list_elements: bool = False, error_string: str | None = None
+) -> AfterValidator:
+    """Validates that the value has a maximum length (strings or arrays)
+
+    :param max_length: The maximum length of the value
+    :param validate_list_elements: Whether to validate the elements in the list or the list length
+    :param error_string: An optional custom error string if validation fails
+    """
+
+    def _validate_maxlength(value: MinMaxValueType) -> MinMaxValueType:
+        if isinstance(value, list) and validate_list_elements:
+            for val in value:
+                _validate_maxlength(val)
+        elif isinstance(value, (type(""), list)):
+            if len(value) > max_length:
+                raise PydanticCustomError("maxlength", str(error_string) if error_string else gettext("Too many"))
+        elif isinstance(value, (int, float)):
+            if value > max_length:
+                raise PydanticCustomError("maxlength", str(error_string) if error_string else gettext("Too short"))
+        return value
+
+    return AfterValidator(_validate_maxlength)
+
+
+def validate_not_empty(error_string: str | None = None) -> AfterValidator:
+    """Validates that a string, list or dict is not empty
+
+    :param error_string: An optional custom error string if validation fails
+    """
+
+    def _validate_not_empty(value: str | list | dict | None) -> str | list | dict | None:
+        if value is not None and len(value) == 0:
+            raise PydanticCustomError(
+                "empty", str(error_string) if error_string else gettext("empty values not allowed")
+            )
+
+        return value
+
+    return AfterValidator(_validate_not_empty)
+
+
+class AsyncValidator:
+    func: Callable[["ResourceModel", Any], Awaitable[None]]
+
+    # to create links with the related resource
+    resource_name: str | None = None
+
+    def __init__(self, func: Callable[["ResourceModel", Any], Awaitable[None]], resource_name: str | None = None):
+        self.func = func
+        self.resource_name = resource_name
+
+
+DataRelationValueType = str | ObjectId | list[str] | list[ObjectId] | None
+
+
+def validate_data_relation_async(
+    resource_name: str, external_field: str = "_id", convert_to_objectid: bool = False, error_string: str | None = None
+) -> AsyncValidator:
+    """Validate the ID on the resource points to an existing resource
+
+    :param resource_name: The name of the resource type the ID points to
+    :param external_field: The field used to find the resource
+    :param convert_to_objectid: If True, will convert the ID to an ObjectId instance
+    :param error_string: An optional custom error string if validation fails
+    """
+
+    async def validate_resource_exists(item: ResourceModel, item_id: DataRelationValueType) -> None:
+        if item_id is None:
+            return
+        elif isinstance(item_id, list):
+            for value in item_id:
+                await validate_resource_exists(item, value)
+        else:
+            if convert_to_objectid:
+                item_id = ObjectId(item_id)
+
+            from superdesk.core import get_current_async_app
+
+            app = get_current_async_app()
+            try:
+                resource_config = app.resources.get_config(resource_name)
+                collection = app.mongo.get_collection_async(resource_config.name)
+                if not await collection.find_one({external_field: item_id}):
+                    raise PydanticCustomError(
+                        "data_relation",
+                        str(error_string)
+                        if error_string
+                        else gettext("Resource '{resource_name}' with ID '{item_id}' does not exist"),
+                        dict(
+                            resource_name=resource_name,
+                            item_id=item_id,
+                        ),
+                    )
+            except KeyError:
+                # Resource is not registered with async resources
+                # Try legacy resources instead
+                from superdesk import get_resource_service
+
+                service = get_resource_service(resource_name)
+                item = service.find_one(req=None, **{external_field: item_id})
+                if item is None:
+                    raise PydanticCustomError(
+                        "data_relation",
+                        gettext("Resource '{resource_name}' with ID '{item_id}' does not exist"),
+                        dict(
+                            resource_name=resource_name,
+                            item_id=item_id,
+                        ),
+                    )
+
+    return AsyncValidator(validate_resource_exists, resource_name)
+
+
+UniqueValueType = str | list[str] | None
+
+
+def validate_unique_value_async(
+    resource_name: str | None = None, field_name: str | None = None, error_string: str | None = None
+) -> AsyncValidator:
+    """Validate that the field is unique in the resource (case-sensitive)
+
+    :param resource_name: The name of the resource where the field must be unique
+    :param field_name: The name of the field where the field must be unique
+    :param error_string: An optional custom error string if validation fails
+    """
+    # "field_name" must have a default value because "resource_name" has one, but its value must be set.
+    assert field_name is not None, '"field_name" must be set'
+
+    async def validate_unique_value_in_resource(item: ResourceModel, name: UniqueValueType) -> None:
+        if name is None:
+            return
+
+        from superdesk.core import get_current_async_app
+
+        app = get_current_async_app()
+        resource_config = app.resources.get_config(resource_name if resource_name else item.model_resource_name)
+        collection = app.mongo.get_collection_async(resource_config.name)
+
+        query = {"_id": {"$ne": item.id}, field_name: {"$in": name} if isinstance(name, list) else name}
+        if await collection.find_one(query):
+            raise PydanticCustomError("unique", str(error_string) if error_string else gettext("Value must be unique"))
+
+    return AsyncValidator(validate_unique_value_in_resource)
+
+
+# TODO-ASYNC: Allow ``resource_name`` to be optional, and we can obtain datasource/resource name from context
+def validate_iunique_value_async(
+    resource_name: str, field_name: str, error_string: str | None = None
+) -> AsyncValidator:
+    """Validate that the field is unique in the resource (case-insensitive)
+
+    :param resource_name: The name of the resource where the field must be unique
+    :param field_name: The name of the field where the field must be unique
+    :param error_string: An optional custom error string if validation fails
+    """
+
+    async def validate_iunique_value_in_resource(item: ResourceModel, name: UniqueValueType) -> None:
+        if name is None:
+            return
+
+        from superdesk.core import get_current_async_app
+
+        app = get_current_async_app()
+        resource_config = app.resources.get_config(resource_name)
+        collection = app.mongo.get_collection_async(resource_config.name)
+
+        query = {
+            "_id": {"$ne": item.id},
+            field_name: (
+                {"$in": [re.compile("^{}$".format(re.escape(value.strip())), re.IGNORECASE) for value in name]}
+                if isinstance(name, list)
+                else re.compile("^{}$".format(re.escape(name.strip())), re.IGNORECASE)
+            ),
+        }
+
+        if await collection.find_one(query):
+            raise PydanticCustomError("unique", str(error_string) if error_string else gettext("Value must be unique"))
+
+    return AsyncValidator(validate_iunique_value_in_resource)
+
+
+def convert_pydantic_validation_error_for_response(validation_error: ValidationError) -> Dict[str, Any]:
+    return {
+        "_status": "ERR",
+        "_error": {"code": 403, "message": "Insertion failure: 1 document(s) contain(s) error(s)"},
+        "_issues": get_field_errors_from_pydantic_validation_error(validation_error),
+    }
+
+
+def get_field_errors_from_pydantic_validation_error(validation_error: ValidationError) -> Dict[str, Dict[str, str]]:
+    use_nested_fields = cast(bool, get_app_config("ASYNC_RESPOND_NESTED_VALIDATION_ERRORS"))
+    issues: Dict[str, Dict[str, Any]] = {}
+    for error in validation_error.errors():
+        try:
+            fields = [str(loc) for loc in error["loc"]]
+            error_destination = issues
+
+            if use_nested_fields and len(fields) > 1:
+                num_fields = len(fields)
+                for index, field in enumerate(fields):
+                    error_destination.setdefault(field, {})
+                    if index < num_fields - 1:
+                        error_destination = error_destination[field]
+                field = fields[-1]
+            else:
+                field = ".".join(fields)
+                error_destination.setdefault(field, {})
+
+            if error["type"] == "missing":
+                # Validations provided by Pydantic
+                error_destination[field]["required"] = gettext("Field is required")
+            elif error["type"] == "empty":
+                error_destination[field] = gettext("empty values not allowed")  # type: ignore[assignment]
+            elif error["type"] == "enum":
+                error_destination[field] = error["msg"]  # type: ignore[assignment]
+            else:
+                error_destination[field][error["type"]] = error["msg"]
+        except (KeyError, TypeError, ValueError) as error:
+            logger.warning(error)
+
+    return issues
+
+
+from .model import ResourceModel  # noqa: E402

@@ -13,6 +13,8 @@
 
 Environment variables names match config name, with some expections documented below.
 """
+from typing import Any, Callable
+from typing_extensions import TypedDict
 import json
 import os
 import pytz
@@ -28,9 +30,9 @@ from distutils.util import strtobool as _strtobool
 logger = logging.getLogger()
 
 
-def strtobool(value):
+def strtobool(value: Any) -> bool:
     try:
-        return bool(_strtobool(value))
+        return bool(_strtobool(value)) if isinstance(value, str) else bool(value)
     except ValueError:
         return False
 
@@ -66,7 +68,7 @@ def celery_queue(name):
 DEFAULT_TIMEZONE = env("DEFAULT_TIMEZONE")
 
 if DEFAULT_TIMEZONE is None:
-    DEFAULT_TIMEZONE = tzlocal.get_localzone().zone
+    DEFAULT_TIMEZONE = tzlocal.get_localzone_name()
 
 if not DEFAULT_TIMEZONE:
     raise ValueError("DEFAULT_TIMEZONE is empty")
@@ -189,7 +191,7 @@ MONGO_URI = env("MONGO_URI", "mongodb://localhost/%s" % MONGO_DBNAME)
 #: More info in `SDESK-7092<https://sofab.atlassian.net/browse/SDESK-7092>`_.
 MONGO_QUERY_BLACKLIST = ["$where", "$expr"]
 
-MONGO_LOCALE = "en_US"
+MONGO_LOCALE = "en"
 
 #: legal archive switch
 LEGAL_ARCHIVE = env("LEGAL_ARCHIVE", None)
@@ -250,21 +252,27 @@ ELASTICSEARCH_SETTINGS = {
 CONTENTAPI_ELASTICSEARCH_SETTINGS = {
     "settings": {
         "analysis": {
+            "filter": {"remove_hyphen": {"pattern": "[-]", "type": "pattern_replace", "replacement": " "}},
             "char_filter": {"html_strip_filter": {"type": "html_strip"}},
             "analyzer": {
+                "phrase_prefix_analyzer": {
+                    "type": "custom",
+                    "filter": ["remove_hyphen", "lowercase"],
+                    "tokenizer": "keyword",
+                },
                 "html_field_analyzer": {
                     "type": "custom",
                     "filter": ["lowercase"],
                     "tokenizer": "standard",
                     "char_filter": ["html_strip_filter"],
-                }
+                },
             },
         }
     }
 }
 
 # https://www.elastic.co/guide/en/elasticsearch/reference/master/search-request-body.html#request-body-search-track-total-hits # NOQA
-ELASTICSEARCH_TRACK_TOTAL_HITS = True
+ELASTICSEARCH_TRACK_TOTAL_HITS = 10000
 
 #: redis url
 REDIS_URL = env("REDIS_URL", "redis://localhost:6379")
@@ -331,7 +339,11 @@ CELERY_TASK_ROUTES = {
     "content_api.commands.item_expiry": {"queue": celery_queue("expiry"), "routing_key": "expiry.content_api"},
     "apps.legal_archive.*": {"queue": celery_queue("legal"), "routing_key": "legal.publish_queue"},
     "superdesk.publish.*": {"queue": celery_queue("publish"), "routing_key": "publish.transmit"},
-    "apps.publish.enqueue.enqueue_published": {"queue": celery_queue("publish"), "routing_key": "publish.enqueue"},
+    "superdesk.publish_async.*": {"queue": celery_queue("publish"), "routing_key": "publish.transmit"},
+    "superdesk.publish_async.exchanges.exchange_factory.*": {
+        "queue": celery_queue("publish"),
+        "routing_key": "publish.transmit",
+    },
 }
 
 #: celery beat config
@@ -359,7 +371,7 @@ CELERY_BEAT_SCHEDULE = {
         "task": "content_api.commands.item_expiry",
         "schedule": crontab(minute="0", hour=local_to_utc_hour(2)),
     },
-    "publish:transmit": {"task": "superdesk.publish.transmit", "schedule": timedelta(seconds=10)},
+    "publish:transmit": {"task": "superdesk.publish_async.commands.transmit", "schedule": timedelta(seconds=10)},
     "content:schedule": {
         "task": "apps.templates.content_templates.create_scheduled_content",
         "schedule": crontab(minute="*/5"),
@@ -368,7 +380,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.legal_archive.import_legal_publish_queue",
         "schedule": timedelta(minutes=5),
     },
-    "publish:enqueue": {"task": "apps.publish.enqueue.enqueue_published", "schedule": timedelta(seconds=10)},
+    "publish:enqueue": {
+        "task": "superdesk.publish_async.commands.enqueue_published",
+        "schedule": timedelta(seconds=10),
+    },
     "legal:import_legal_archive": {
         "task": "apps.legal_archive.import_legal_archive",
         "schedule": crontab(minute=30, hour=local_to_utc_hour(0)),
@@ -378,7 +393,7 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": crontab(minute=0),
     },
     "subscribers:schedule_update": {
-        "task": "superdesk.publish.subscribers_schedule.update_subscriber_activation_states",
+        "task": "superdesk.publish_async.resources.subscribers.subscribers_schedule.update_subscriber_activation_states",
         "schedule": crontab(minute=0, hour=local_to_utc_hour(0)),
     },
 }
@@ -386,6 +401,12 @@ CELERY_BEAT_SCHEDULE = {
 #: Sentry DSN - will report exceptions there
 SENTRY_DSN = env("SENTRY_DSN")
 SENTRY_INCLUDE_PATHS = ["superdesk", "apps"]
+SENTRY_TRACES_SAMPLE_RATE = (
+    float(os.environ["SENTRY_TRACES_SAMPLE_RATE"]) if os.environ.get("SENTRY_TRACES_SAMPLE_RATE") else None
+)
+SENTRY_PROFILES_SAMPLE_RATE = (
+    float(os.environ["SENTRY_PROFILES_SAMPLE_RATE"]) if os.environ.get("SENTRY_PROFILES_SAMPLE_RATE") else None
+)
 
 #: Set to number between 0.0 to 1.0 to enable sentry Enable Sentry traces
 SENTRY_TRACES_SAMPLE_RATE = float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0")) or None
@@ -418,10 +439,188 @@ CORE_APPS = [
     "apps.usage_metrics",
     "superdesk.system.health",
     "apps.languages",
+    "superdesk.publish_async",
 ]
 
 #: Specify what modules should be enabled
 INSTALLED_APPS = []
+
+#: List of modules to load, using ``superdesk.core.module.Module`` instance
+#:
+#: ..versionadded: 3.0.0
+#:
+MODULES = [
+    "superdesk.users",
+    "apps.desks_async",
+    "superdesk.vocabularies_async",
+    "superdesk.archive_async",
+    "superdesk.archived_async",
+    "superdesk.content_types_async",
+    "superdesk.publish_async.module",
+    "superdesk.auth_server.oauth2",
+]
+
+ASYNC_AUTH_CLASS = "superdesk.core.auth.token_auth:TokenAuthorization"
+
+ASYNC_ENABLE_CORS = True
+
+ASYNC_POPULATE_HATEOAS = True
+
+ASYNC_RESPOND_NESTED_VALIDATION_ERRORS = True
+
+
+class ExchangeConfig(TypedDict, total=False):
+    """A dict to define a PublishExchange config"""
+
+    #: Name of a registered PublishExchange to use
+    exchange: str
+
+    #: Name of a registered PublishExchangeFilter to use
+    filter: str
+
+    #: Name of a registered PublishExchangeFormatter to use
+    formatter: str
+
+    #: Name of a registered PublishExchangeRouter to use
+    router: str
+
+    #: If ``True`` will set the published item ``queue_state`` to ``pending``, for the celery beat schedule to
+    #: pick it up (used in content based exchanges only)
+    polling: bool
+
+
+class PublishChannelConfig(TypedDict, total=False):
+    """A dict to define list of filters and PublishExchange config to use"""
+
+    #: List of item types to match
+    item_types: list[str]
+
+    #: List of PublishProducer actions to match
+    operations: list[str]
+
+    #: List of PublishSenderType's to match
+    #: One of ``api``, ``ingest_rule``, ``macro`` or ``internal``
+    sender_types: list[str]
+
+    #: Function used for custom filtering based on the item to be published
+    filter: Callable[[dict], bool]
+
+    #: Config for the PublishExchange that matches this channel
+    config: ExchangeConfig
+
+
+PUBLISH_CHANNELS: list[PublishChannelConfig] = [
+    {
+        "operations": ["resend"],
+        "filter": lambda item: not len(item.get("associations") or {}),
+        "config": ExchangeConfig(
+            exchange="content",
+            filter="resend",
+            router="asyncio",
+        ),
+    },
+    {
+        "operations": ["resend"],
+        "config": ExchangeConfig(
+            exchange="content",
+            filter="resend",
+        ),
+    },
+    {
+        "operations": ["correct"],
+        "filter": lambda item: not len(item.get("associations") or {}),
+        "config": ExchangeConfig(
+            exchange="content",
+            filter="content:corrected",
+            router="asyncio",
+        ),
+    },
+    {
+        "operations": ["correct"],
+        "config": ExchangeConfig(
+            exchange="content",
+            filter="content:corrected",
+        ),
+    },
+    {
+        "operations": ["kill", "takedown"],
+        "config": ExchangeConfig(
+            exchange="content",
+            filter="content:killed",
+            router="asyncio",
+        ),
+    },
+    {
+        # If the request is coming from the Web API and has no associations
+        # then we can handle this publish request via asyncio (aka instant publishing)
+        "item_types": ["text", "preformatted"],
+        "sender_types": ["api"],
+        "filter": lambda item: not len(item.get("associations") or {}),
+        "config": ExchangeConfig(
+            exchange="content",
+            filter="content",
+            router="asyncio",
+        ),
+    },
+    {
+        # If the request is coming from the Web API and has no associations
+        # then we can handle this publish request via asyncio (aka instant publishing)
+        "item_types": ["text", "preformatted"],
+        "config": ExchangeConfig(
+            exchange="content",
+            filter="content",
+        ),
+    },
+    {
+        "item_types": ["composite"],
+        "config": ExchangeConfig(
+            exchange="content",
+            filter="content",
+            router="asyncio",
+        ),
+    },
+    {
+        "item_types": ["audio", "video", "picture", "graphic"],
+        "config": ExchangeConfig(
+            exchange="content",
+            router="celery",
+            polling=True,
+        ),
+    },
+    {
+        "sender_types": ["api"],
+        "config": ExchangeConfig(
+            router="asyncio",
+        ),
+    },
+    {
+        "sender_types": ["ingest_rule"],
+        "config": ExchangeConfig(
+            router="celery",
+            polling=True,
+        ),
+    },
+]
+
+PUBLISH_EXCHANGE_FACTORY = "superdesk.publish_async.exchanges:DefaultPublishExchangeFactory"
+DEFAULT_PUBLISH_CHANNEL = ExchangeConfig(
+    exchange="default",
+    filter="default",
+    formatter="default",
+    router="celery",
+    polling=False,
+)
+
+PUBLISH_MODULES = [
+    "superdesk.publish_async.exchanges",
+    "superdesk.publish_async.filters",
+    "superdesk.publish_async.formatters",
+    "superdesk.publish_async.routers",
+    "superdesk.publish_async.consumers",
+]
+
+PUBLISH_DEFAULT_CELERY_QUEUE = celery_queue("publish")
+PUBLISH_EXCHANGE_CELERY_QUEUE = CELERY_TASK_DEFAULT_QUEUE
 
 #: LDAP Server (eg: ldap://sourcefabric.org)
 LDAP_SERVER = env("LDAP_SERVER", "")
@@ -511,11 +710,9 @@ CORE_APPS.extend(
         "apps.rules",
         "apps.highlights",
         "apps.marked_desks",
-        "apps.products",
         "apps.publish",
         "apps.export",
         "apps.publish.formatters",
-        "apps.content_filters",
         "apps.content_types",
         "apps.dictionaries",
         "apps.duplication",
@@ -1165,3 +1362,5 @@ PICTURE_METADATA_MAPPING = {}
 #: .. versionadded:: 2.8
 #:
 BROADCAST_ENABLED = strtobool(env("BROADCAST_ENABLED", "true"))
+
+CORRECTIONS_WORKFLOW = False

@@ -13,8 +13,10 @@ import superdesk
 from lxml import html
 from copy import deepcopy
 from datetime import datetime
-from flask import current_app as app, json
 from eve.io.mongo import Validator
+
+from superdesk.core import get_app_config
+from superdesk.eve_async import AsyncBaseService
 from superdesk.metadata.item import ITEM_TYPE
 from superdesk.logging import logger
 from superdesk.text_utils import get_text
@@ -22,7 +24,7 @@ from superdesk import get_resource_service
 from _collections_abc import MutableMapping  # typing: ignore
 from superdesk.signals import item_validate
 from superdesk.validator import BaseErrorHandler
-from flask_babel import lazy_gettext, _
+from quart_babel import lazy_gettext, gettext as _
 from superdesk.default_schema import DEFAULT_SCHEMA_MAP
 
 
@@ -175,6 +177,7 @@ class SchemaValidator(Validator):
         subject_schemas = {}
 
         if field == "subject":
+            # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
             cvs = get_resource_service("vocabularies").get_from_mongo(req=None, lookup={"schema_field": field})
             for cv in cvs:
                 subject_schemas.update({field: cv["_id"]})
@@ -214,6 +217,7 @@ class SchemaValidator(Validator):
             subject_schemas = {None, "", "subject_custom"}
 
             # plus any cv with schema_field subject
+            # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
             cvs = get_resource_service("vocabularies").get_from_mongo(
                 req=None, lookup={"schema_field": field}, projection={"_id": 1}
             )
@@ -279,7 +283,7 @@ class SchemaValidator(Validator):
         if value:
             value = str(html.fromstring(value).text_content())
 
-        disallowed_characters = app.config.get("DISALLOWED_CHARACTERS")
+        disallowed_characters = get_app_config("DISALLOWED_CHARACTERS")
 
         if validate and disallowed_characters and value:
             invalid_chars = [char for char in disallowed_characters if char in value]
@@ -330,22 +334,22 @@ class ValidateResource(superdesk.Resource):
     item_methods = []
 
 
-class ValidateService(superdesk.Service):
-    def create(self, docs, fields=False, **kwargs):
+class ValidateService(AsyncBaseService):
+    async def create_async(self, docs, fields=False, **kwargs):
         for doc in docs:
-            doc["errors"] = self.validate(doc, fields=fields, **kwargs)
+            doc["errors"] = await self.validate(doc, fields=fields, **kwargs)
         if fields:
             return [doc["errors"] for doc in docs]
         return [i for i in range(len(docs))]
 
-    def validate(self, doc, fields=False, **kwargs):
+    async def validate(self, doc, fields=False, **kwargs):
         test_doc = deepcopy(doc)
-        return self._validate(test_doc, fields=fields, **kwargs)
+        return await self._validate(test_doc, fields=fields, **kwargs)
 
-    def _get_profile_schema(self, schema, doc):
+    async def _get_profile_schema(self, schema, doc):
         doc["validate"].setdefault("extra", {})  # make sure extra is there so it will validate its fields
         extra_field_types = {"text": "string", "embed": "dict", "date": "date", "urls": "list", "custom": "any"}
-        extra_fields = superdesk.get_resource_service("vocabularies").get_extra_fields()
+        extra_fields = await superdesk.get_resource_service("vocabularies").get_extra_fields_async()
         schema["extra"] = {"type": "dict", "schema": {}}
         for extra_field in extra_fields:
             if schema.get(extra_field["_id"]) and extra_field.get("field_type", None) in extra_field_types:
@@ -360,7 +364,7 @@ class ValidateService(superdesk.Service):
             pass
         return [{"schema": schema}]
 
-    def _get_validators(self, doc):
+    async def _get_validators(self, doc):
         """Get validators.
 
         In case there is profile defined for item with respective content type it will
@@ -370,15 +374,17 @@ class ValidateService(superdesk.Service):
         profile_id = doc["validate"].get("profile") or item_type
 
         # use content profile if exists
-        if profile_id and (app.config["AUTO_PUBLISH_CONTENT_PROFILE"] or doc["act"] != "auto_publish"):
-            content_type = superdesk.get_resource_service("content_types").find_one(req=None, _id=profile_id)
+        if profile_id and (get_app_config("AUTO_PUBLISH_CONTENT_PROFILE") or doc["act"] != "auto_publish"):
+            content_type = await superdesk.get_resource_service("content_types").find_one_async(
+                req=None, _id=profile_id
+            )
             if content_type:
-                return self._get_profile_schema(content_type.get("schema", {}), doc)
+                return await self._get_profile_schema(content_type.get("schema", {}), doc)
 
         # use custom schema like profile schema
-        custom_schema = app.config.get("SCHEMA", {}).get(doc[ITEM_TYPE])
+        custom_schema = get_app_config("SCHEMA", {}).get(doc[ITEM_TYPE])
         if custom_schema:
-            return self._get_profile_schema(custom_schema, doc)
+            return await self._get_profile_schema(custom_schema, doc)
 
         # no profile or schema, use validators
         lookup = {"act": doc["act"], "type": doc[ITEM_TYPE]}
@@ -386,14 +392,16 @@ class ValidateService(superdesk.Service):
             lookup["embedded"] = doc["embedded"]
         else:
             lookup["$or"] = [{"embedded": {"$exists": False}}, {"embedded": False}]
-        validators = list(superdesk.get_resource_service("validators").get(req=None, lookup=lookup))
+        validators = await (
+            await superdesk.get_resource_service("validators").get_async(req=None, lookup=lookup)
+        ).to_list()
         if validators:
             return validators
 
         # last resort - default schema
         default_schema = DEFAULT_SCHEMA_MAP.get(item_type)
         if default_schema:
-            return self._get_profile_schema(default_schema, doc)
+            return await self._get_profile_schema(default_schema, doc)
 
         # no rules for validation
         return []
@@ -497,7 +505,7 @@ class ValidateService(superdesk.Service):
         :return:
         """
         if doc.get("associations"):
-            schema.setdefault("associations", {})["media_metadata"] = app.config.get(
+            schema.setdefault("associations", {})["media_metadata"] = get_app_config(
                 "VALIDATE_MEDIA_METADATA_ON_PUBLISH", True
             )
 
@@ -508,15 +516,16 @@ class ValidateService(superdesk.Service):
         """
         return {field: get_validator_schema(schema) for field, schema in validator["schema"].items() if schema}
 
-    def _get_vocabulary_display_name(self, vocabulary_id):
+    async def _get_vocabulary_display_name(self, vocabulary_id):
+        cv_service = get_resource_service("vocabularies")
         if vocabulary_id == "anpa_category":
-            vocabulary = get_resource_service("vocabularies").find_one(req=None, _id="categories")
+            vocabulary = await cv_service.find_one_async(req=None, _id="categories")
         elif vocabulary_id == "subject":
-            cv = get_resource_service("vocabularies").find_one(req=None, schema_field=vocabulary_id)
+            cv = await cv_service.find_one_async(req=None, schema_field=vocabulary_id)
             id = cv["_id"] if cv else vocabulary_id
-            vocabulary = get_resource_service("vocabularies").find_one(req=None, _id=id)
+            vocabulary = await cv_service.find_one_async(req=None, _id=id)
         else:
-            vocabulary = get_resource_service("vocabularies").find_one(req=None, _id=vocabulary_id)
+            vocabulary = await cv_service.find_one_async(req=None, _id=vocabulary_id)
         if vocabulary and "display_name" in vocabulary:
             return vocabulary["display_name"]
         return vocabulary_id
@@ -531,10 +540,10 @@ class ValidateService(superdesk.Service):
             return FIELD_LABELS.get(error_field)
         return error_field
 
-    def _validate(self, doc, fields=False, **kwargs):
+    async def _validate(self, doc, fields=False, **kwargs):
         item = deepcopy(doc["validate"])  # make a copy for signal before validation processing
         use_headline = kwargs and "headline" in kwargs
-        validators = self._get_validators(doc)
+        validators = await self._get_validators(doc)
         for validator in validators:
             validation_schema = self._get_validator_schema(validator)
             self._sanitize_fields(doc["validate"], validator)
@@ -563,14 +572,14 @@ class ValidateService(superdesk.Service):
                     continue
                 elif e == "extra":
                     for field in error_list[e]:
-                        display_name = self._get_vocabulary_display_name(field)
+                        display_name = await self._get_vocabulary_display_name(field)
                         if "required" in error_list[e][field]:
                             messages.append(ERROR_MESSAGES[REQUIRED_ERROR].format(display_name))
                         else:
                             error_field = self.get_error_field_name(display_name)
                             messages.append("{} {}".format(error_field, error_list[e][field]))
                 elif "required field" in error_list[e] or type(error_list[e]) is dict or type(error_list[e]) is list:
-                    display_name = self._get_vocabulary_display_name(e)
+                    display_name = await self._get_vocabulary_display_name(e)
                     error_field = self.get_error_field_name(display_name)
                     messages.append(ERROR_MESSAGES[REQUIRED_ERROR].format(error_field.upper()))
                 elif "min length is 1" == error_list[e] or "null value not allowed" in error_list[e]:

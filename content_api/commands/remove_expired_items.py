@@ -9,10 +9,12 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 import logging
-import superdesk
 from datetime import timedelta
 
-from flask import current_app as app
+import click
+
+from superdesk.commands import cli
+from superdesk.core import get_app_config
 from superdesk import get_resource_service
 from superdesk.celery_task_utils import get_lock_id
 from superdesk.lock import lock, unlock
@@ -21,7 +23,9 @@ from superdesk.utc import utcnow
 logger = logging.getLogger(__name__)
 
 
-class RemoveExpiredItems(superdesk.Command):
+@cli.command("content_api:remove_expired")
+@click.option("--expiry", "-m", "expiry_days", required=False, type=int)
+def cli_content_api_remove_expired(expiry_days: int | None = None):
     """Remove expired items from the content_api items collection.
 
     By default no items expire there, you can change it using ``CONTENT_API_EXPIRY_DAYS`` config.
@@ -33,16 +37,18 @@ class RemoveExpiredItems(superdesk.Command):
 
     """
 
+    RemoveExpiredItems().run(expiry_days)
+
+
+class RemoveExpiredItems:
     log_msg = ""
     expiry_days = 0  # by default this should not run
-
-    option_list = [superdesk.Option("--expiry", "-m", dest="expiry_days", required=False)]
 
     def run(self, expiry_days=None):
         if expiry_days:
             self.expiry_days = int(expiry_days)
-        elif app.config.get("CONTENT_API_EXPIRY_DAYS"):
-            self.expiry_days = app.config["CONTENT_API_EXPIRY_DAYS"]
+        elif get_app_config("CONTENT_API_EXPIRY_DAYS"):
+            self.expiry_days = get_app_config("CONTENT_API_EXPIRY_DAYS")
 
         if self.expiry_days == 0:
             logger.info("Expiry days is set to 0, therefor no items will be removed.")
@@ -77,6 +83,7 @@ class RemoveExpiredItems(superdesk.Command):
         items_service = get_resource_service("capi_items_internal")
 
         num_items_removed = 0
+        # TODO-ASYNC[content_api]: Use async service when upgrading the ContentAPI app to async
         for expired_items in items_service.get_expired_items(
             expiry_datetime=expiry_datetime, expiry_days=expiry_days, include_children=False
         ):
@@ -134,6 +141,3 @@ class RemoveExpiredItems(superdesk.Command):
         :return list: The list of children for this root item
         """
         return list(service.find({"ancestors": item["_id"]}))
-
-
-superdesk.command("content_api:remove_expired", RemoveExpiredItems())

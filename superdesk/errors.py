@@ -8,15 +8,16 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
+from typing_extensions import Self
+from inspect import isawaitable
 import logging
 
-from flask import current_app as app
 from cerberus import DocumentError
-from eve.endpoints import send_response
 from werkzeug.exceptions import HTTPException
 from elasticsearch.exceptions import ConnectionTimeout  # noqa
 
 from superdesk.utils import save_error_data
+from superdesk.resource_fields import STATUS, STATUS_ERR, ISSUES
 
 
 logger = logging.getLogger(__name__)
@@ -28,9 +29,11 @@ def add_notifier(notifier):
         notifiers.append(notifier)
 
 
-def update_notifiers(*args, **kwargs):
+async def update_notifiers(*args, **kwargs):
     for notifier in notifiers:
-        notifier(*args, **kwargs)
+        response = notifier(*args, **kwargs)
+        if isawaitable(response):
+            await response
 
 
 def get_registered_errors(self):
@@ -68,7 +71,9 @@ def log_exception(message, extra=None, data=None):
 
 def notifications_enabled():
     """Test if notifications are enabled in config."""
-    return app.config.get("ERROR_NOTIFICATIONS", True)
+    from superdesk.core import get_app_config
+
+    return get_app_config("ERROR_NOTIFICATIONS", True)
 
 
 class SuperdeskError(DocumentError):
@@ -90,7 +95,7 @@ class SuperdeskError(DocumentError):
         desc_text = "" if not self.desc else (" Details: " + self.desc)
         return "{} Error {} - {}{desc}".format(self.__class__.__name__, self.code, self.message, desc=desc_text)
 
-    def to_dict(self):
+    def to_dict(self) -> dict:
         return {
             "code": self.code,
             "desc": self.desc,
@@ -124,13 +129,13 @@ class SuperdeskApiError(SuperdeskError):
         elif message:
             logger.error("HTTP Exception {} has been raised: {}".format(status_code, message))
 
-    def to_dict(self):
+    def to_dict(self) -> dict:
         """Create dict for json response."""
         rv = {}
-        rv[app.config["STATUS"]] = app.config["STATUS_ERR"]
-        rv["_message"] = self.message or ""
+        rv[STATUS] = STATUS_ERR
+        rv["_message"] = str(self.message or "")
         if hasattr(self, "payload"):
-            rv[app.config["ISSUES"]] = self.payload
+            rv[ISSUES] = self.payload
         return rv
 
     def __str__(self):
@@ -157,6 +162,10 @@ class SuperdeskApiError(SuperdeskError):
     @classmethod
     def preconditionFailedError(cls, message=None, payload=None, exception=None):
         return SuperdeskApiError(status_code=412, message=message, payload=payload, exception=exception)
+
+    @classmethod
+    def preconditionRequiredError(cls, message=None, payload=None, exception=None):
+        return SuperdeskApiError(status_code=428, message=message, payload=payload, exception=exception)
 
     @classmethod
     def internalError(cls, message=None, payload=None, exception=None):
@@ -210,7 +219,27 @@ class InvalidStateTransitionError(SuperdeskApiError):
         super().__init__(message, status_code)
 
 
-class SuperdeskIngestError(SuperdeskError):
+class SuperdeskErrorWithNotifications(SuperdeskError):
+    def _set_notification_args(self, *args, **kwargs):
+        self._notification_args = dict(args=args, kwargs=kwargs)
+
+    async def send_notifications(self) -> Self:
+        args = getattr(self, "_notification_args", {})
+        if args:
+            try:
+                await update_notifiers(*args["args"], **args["kwargs"])
+            except KeyError:
+                # this might not be working during tests
+                # and should be probably avoided in the first place
+                pass
+
+            # Make sure multiple notifications won't be sent for this one exception
+            self._notification_args = {}
+
+        return self
+
+
+class SuperdeskIngestError(SuperdeskErrorWithNotifications):
     _codes = {
         2000: "Configured Feed Parser either not found or not registered with the application",
         2001: "Configuration of the feeding service is missing or incomplete",
@@ -233,18 +262,14 @@ class SuperdeskIngestError(SuperdeskError):
                     message += '\nitem="{}" name="{}"'.format(
                         item.get("guid", ""), item.get("headline", item.get("slugline", ""))
                     )
-                try:
-                    update_notifiers(
-                        "error",
-                        message,
+                self._set_notification_args(
+                    ["error", message],
+                    dict(
                         resource="ingest_providers" if provider else None,
                         name=self.provider_name,
                         provider_id=provider.get("_id", ""),
-                    )
-                except KeyError:
-                    # this might not be working during tests
-                    # and should be probably avoided in the first place
-                    pass
+                    ),
+                )
 
             if provider:
                 message = "{}: {} on channel {}".format(self, exception, self.provider_name)
@@ -526,7 +551,7 @@ class IngestTwitterError(SuperdeskIngestError):
         return IngestTwitterError(6400, exception, provider)
 
 
-class SuperdeskPublishError(SuperdeskError):
+class SuperdeskPublishError(SuperdeskErrorWithNotifications):
     def __init__(self, code, exception, destination=None):
         super().__init__(code)
         self.system_exception = exception
@@ -536,12 +561,16 @@ class SuperdeskPublishError(SuperdeskError):
         if exception:
             exception_msg = str(exception)[-200:]
             if notifications_enabled():
-                update_notifiers(
-                    "error",
-                    "Error [%s] on a Subscriber" "s destination {{name}}: %s" % (code, exception_msg),
-                    resource="subscribers" if destination else None,
-                    name=self.destination_name,
-                    provider_id=destination.get("_id", ""),
+                self._set_notification_args(
+                    [
+                        "error",
+                        "Error [%s] on a Subscriber" "s destination {{name}}: %s" % (code, exception_msg),
+                    ],
+                    dict(
+                        resource="subscribers" if destination else None,
+                        name=self.destination_name,
+                        provider_id=destination.get("_id", ""),
+                    ),
                 )
 
             extra = {}
@@ -769,21 +798,29 @@ class SuperdeskValidationError(HTTPException):
         Exception.__init__(self)
         self.errors = errors
         self.fields = fields
+
         try:
-            self.response = send_response(
-                None,
-                (
+            # Importing here due to circular import issues
+            from superdesk.core import get_current_app, get_config, json
+
+            self.response = get_current_app().response_class(
+                json.dumps(
                     {
-                        app.config["STATUS"]: app.config["STATUS_ERR"],
-                        app.config["ISSUES"]: {
+                        STATUS: STATUS_ERR,
+                        ISSUES: {
                             "validator exception": str([self.errors]),  # BC
                             "fields": self.fields,
                         },
-                    },
-                    None,
-                    None,
-                    400,
+                    }
                 ),
+                400,
+                {
+                    "Access-Control-Allow-Origin": get_config(str, "CLIENT_URL"),
+                    "Access-Control-Allow-Headers": ",".join(get_config(list, "X_HEADERS")),
+                    "Access-Control-Allow-Credentials": "true",
+                    "Access-Control-Allow-Methods": "*",
+                    "Content-Type": "application/json",
+                },
             )
         except RuntimeError as e:
             # the exception is run outside of request context

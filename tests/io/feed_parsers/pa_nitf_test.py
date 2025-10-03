@@ -18,16 +18,15 @@ from lxml import etree
 class PANITFFileTestCase(TestCase):
     vocab = [{"_id": "genre", "items": [{"name": "Current"}]}]
 
-    def setUpForChildren(self):
-        super().setUpForChildren()
-        with self.app.app_context():
-            self.app.data.insert("vocabularies", self.vocab)
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.app.data.insert("vocabularies", self.vocab)
         dirname = os.path.dirname(os.path.realpath(__file__))
         fixture = os.path.normpath(os.path.join(dirname, "../fixtures", self.filename))
         provider = {"name": "Test"}
         with open(fixture, "rb") as f:
             xml = etree.parse(f)
-            self.item = PAFeedParser().parse(xml.getroot(), provider)
+            self.item = await PAFeedParser().parse(xml.getroot(), provider)
 
 
 class PAFileWithNoSubjects(PANITFFileTestCase):

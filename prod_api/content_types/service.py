@@ -9,18 +9,19 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 import bson
-import re
+
 import superdesk
+from superdesk.eve_async import AsyncBaseService
 from superdesk.utils import format_content_type_name
 
 
-class ContentTypesService(superdesk.Service):
-    def get_output_name(self, profile_id):
+class ContentTypesService(AsyncBaseService):
+    async def get_output_name(self, profile_id):
         service = superdesk.get_resource_service("content_types")
         try:
             _id = bson.ObjectId(profile_id)
         except bson.errors.InvalidId:
             _id = profile_id
 
-        profile = service.find_one(req=None, _id=_id) or {}
+        profile = (await service.find_one_async(req=None, _id=_id)) or {}
         return format_content_type_name(profile, str(profile_id))

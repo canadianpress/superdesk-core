@@ -49,7 +49,7 @@ Feature: Rundowns
         When we delete "/shows/#shows._id#"
         Then we get error 409
         """
-        {"message": "Can't remove show if there are rundowns."}
+        {"_error": {"code": 409, "message": "Can't remove show if there are rundowns."}, "_status": "ERR"}
         """
 
         When we delete "/rundowns/#rundowns._id#"
@@ -590,7 +590,7 @@ Feature: Rundowns
         """
         Then we get ok response
 
-        When we login as user "foo" with password "bar" and user type "administrator"
+        When we login as user "foo" with password "barword" and user type "administrator"
  
         And we patch "/rundowns/#rundowns._id#"
         """
@@ -643,7 +643,7 @@ Feature: Rundowns
         {"_lock_user": null, "_lock_time": null, "_lock_session": null, "_lock": false}
         """
 
-        When we login as user "foo2" with password "bar" and user type "administrator"
+        When we login as user "foo2" with password "barword" and user type "administrator"
 
         And we patch "/rundowns/#rundowns._id#"
         """
@@ -674,7 +674,7 @@ Feature: Rundowns
         {"_lock_user": null, "_lock_time": null, "_lock_session": null}
         """
 
-        When we login as user "foo2" with password "bar" and user type "administrator"
+        When we login as user "foo2" with password "barword" and user type "administrator"
  
         And we patch "/rundowns/#rundowns._id#"
         """
