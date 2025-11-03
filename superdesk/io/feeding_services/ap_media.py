@@ -16,9 +16,9 @@ import logging
 from datetime import timedelta, datetime
 
 from lxml import etree
-from flask import current_app as app
 
 import superdesk
+from superdesk.core import get_app_config
 from superdesk.io.registry import register_feeding_service
 from superdesk.io.feeding_services.http_base_service import HTTPFeedingServiceBase
 from superdesk.errors import IngestApiError
@@ -84,10 +84,12 @@ class APMediaFeedingService(HTTPFeedingServiceBase):
 
     HTTP_TIMEOUT = 40
 
-    def config_test(self, provider=None):
+    async def config_test(self, provider=None):
         self.provider = provider
         self._get_products(provider)
-        original = superdesk.get_resource_service("ingest_providers").find_one(req=None, _id=provider.get("_id"))
+        original = await superdesk.get_resource_service("ingest_providers").find_one_async(
+            req=None, _id=provider.get("_id")
+        )
         # If there has been a change in the required products then reset the next link
         if original and (
             original.get("config", {}).get("productList", "") != provider.get("config", {}).get("productList", "")
@@ -114,13 +116,13 @@ class APMediaFeedingService(HTTPFeedingServiceBase):
                 productList.append("{}".format(entitlement.get("id")))
         provider["config"]["availableProducts"] = ",".join(productList)
 
-    def _update(self, provider, update):
+    async def _update(self, provider, update):
         self.HTTP_URL = provider.get("config", {}).get("api_url", "")
         self.provider = provider
 
         # Use the next link if one is available in the config
         if provider.get("config", {}).get("next_link"):
-            r = self.get_url(url=provider.get("config", {}).get("next_link"))
+            r = await self.get_url(url=provider.get("config", {}).get("next_link"))
             r.raise_for_status()
         else:
             params = dict()
@@ -142,12 +144,12 @@ class APMediaFeedingService(HTTPFeedingServiceBase):
             params["versions"] = "all"
 
             logger.info("AP Media Start/Recovery time: {} params {}".format(recovery_time, params))
-            r = self.get_url(params=params)
+            r = await self.get_url(params=params)
             r.raise_for_status()
         try:
             response = json.loads(r.text)
         except Exception:
-            raise IngestApiError.apiRequestError(Exception("error parsing response"))
+            raise await IngestApiError.apiRequestError(Exception("error parsing response")).send_notifications()
 
         nextLink = response.get("data", {}).get("next_page")
         # Got the same next link as last time so nothing new
@@ -155,7 +157,7 @@ class APMediaFeedingService(HTTPFeedingServiceBase):
             logger.info("Nothing new from AP Media")
             return []
 
-        parser = self.get_feed_parser(provider)
+        parser = await self.get_feed_parser(provider)
         parsed_items = []
         for item in response.get("data", {}).get("items", []):
             try:
@@ -165,7 +167,7 @@ class APMediaFeedingService(HTTPFeedingServiceBase):
                         item.get("item", {}).get("headline"), item.get("item", {}).get("uri")
                     )
                 )
-                r = self.api_get(item.get("item", {}).get("uri"))
+                r = await self.api_get(item.get("item", {}).get("uri"))
                 complete_item = json.loads(r.text)
 
                 # Get the nitf rendition of the item
@@ -174,7 +176,7 @@ class APMediaFeedingService(HTTPFeedingServiceBase):
                 )
                 if nitf_ref:
                     logger.info("Get AP nitf : {}".format(nitf_ref))
-                    r = self.api_get(nitf_ref)
+                    r = await self.api_get(nitf_ref)
                     root_elt = etree.fromstring(r.content)
 
                     # If the default namespace definition is the nitf namespace then remove it
@@ -184,7 +186,7 @@ class APMediaFeedingService(HTTPFeedingServiceBase):
                                 elem.tag = elem.tag.replace("{" + nitf_namespace["nitf"] + "}", "")
                         etree.cleanup_namespaces(root_elt)
 
-                    nitf_item = nitf.NITFFeedParser().parse(root_elt)
+                    nitf_item = await nitf.NITFFeedParser().parse(root_elt)
                     complete_item["nitf"] = nitf_item
                 else:
                     if item.get("item", {}).get("type") == "text":
@@ -196,12 +198,12 @@ class APMediaFeedingService(HTTPFeedingServiceBase):
                     for key, assoc in associations.items():
                         logger.info('Get AP association "%s"', assoc.get("headline"))
                         try:
-                            related_json = self.api_get(assoc["uri"]).json()
+                            related_json = (await self.api_get(assoc["uri"])).json()
                             complete_item["associations"][key] = related_json
                         except IngestApiError:
                             logger.warning("Could not fetch AP association", extra=assoc)
 
-                parsed_items.append(parser.parse(complete_item, provider))
+                parsed_items.append(await parser.parse(complete_item, provider))
 
             # Any exception processing an indivisual item is swallowed
             except Exception as ex:
@@ -215,15 +217,15 @@ class APMediaFeedingService(HTTPFeedingServiceBase):
 
         return [parsed_items]
 
-    def api_get(self, url):
-        resp = self.get_url(url=url)
+    async def api_get(self, url):
+        resp = await self.get_url(url=url)
         resp.raise_for_status()
         return resp
 
     def get_request_kwargs(self) -> Dict[str, Any]:
         request_kwargs = dict(
             timeout=self.HTTP_TIMEOUT,
-            verify=app.config.get("AP_MEDIA_API_VERIFY_SSL", True),
+            verify=get_app_config("AP_MEDIA_API_VERIFY_SSL", True),
             allow_redirects=True,
         )
         try:

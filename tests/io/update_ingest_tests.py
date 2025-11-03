@@ -17,10 +17,11 @@ from unittest.mock import patch
 from bson import ObjectId
 from eve.utils import ParsedRequest
 
+from superdesk.flask import g
 from superdesk import get_resource_service, etree
 from superdesk.utc import utcnow
 from superdesk.errors import SuperdeskApiError, ProviderError
-from superdesk.tests import TestCase
+from superdesk.tests import TestCase, utils as test_utils, fixtures
 from superdesk.tests.setup_teardown import setup_providers, teardown_providers
 from superdesk.io import get_feeding_service
 from superdesk.io.commands.remove_expired_content import RemoveExpiredContent, get_expired_items
@@ -35,7 +36,6 @@ from superdesk.io.commands.update_ingest import (
     get_is_idle,
     ingest_item,
 )
-import flask
 
 reuters_guid = "tag_reuters.com_2014_newsml_KBN0FL0NM:10"
 
@@ -54,57 +54,58 @@ def get_file(url, request_kwargs=None):
 
 
 class UpdateIngestTest(TestCase):
-    def setUp(self):
-        setup_providers(self)
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        await setup_providers(self)
 
     def tearDown(self):
         teardown_providers(self)
 
-    def _get_provider(self, provider_name):
-        return get_resource_service("ingest_providers").find_one(name=provider_name, req=None)
+    async def _get_provider(self, provider_name):
+        return await test_utils.find_one("ingest_providers", name=provider_name)
 
     def _get_provider_service(self, provider):
         return get_feeding_service(provider["feeding_service"])
 
-    def setup_reuters_provider(self):
+    async def setup_reuters_provider(self):
         provider_name = "reuters"
-        provider = get_resource_service("ingest_providers").find_one(name=provider_name, req=None)
+        provider = await test_utils.find_one("ingest_providers", name=provider_name)
         provider_service = self._get_provider_service(provider)
         provider_service.provider = provider
         provider_service.URL = provider.get("config", {}).get("url")
         return provider, provider_service
 
-    def test_ingest_items(self):
-        provider, provider_service = self.setup_reuters_provider()
-        items = provider_service.fetch_ingest(reuters_guid)
-        items.extend(provider_service.fetch_ingest(reuters_guid))
+    async def test_ingest_items(self):
+        provider, provider_service = await self.setup_reuters_provider()
+        items = await provider_service.fetch_ingest(reuters_guid)
+        items.extend(await provider_service.fetch_ingest(reuters_guid))
         self.assertEqual(12, len(items))
-        self.ingest_items(items, provider, provider_service)
+        await self.ingest_items(items, provider, provider_service)
 
-    def test_ingest_item_expiry(self):
-        provider, provider_service = self.setup_reuters_provider()
-        items = provider_service.fetch_ingest(reuters_guid)
+    async def test_ingest_item_expiry(self):
+        provider, provider_service = await self.setup_reuters_provider()
+        items = await provider_service.fetch_ingest(reuters_guid)
         self.assertIsNone(items[1].get("expiry"))
         items[1]["versioncreated"] = utcnow()
-        self.ingest_items([items[1]], provider, provider_service)
+        await self.ingest_items([items[1]], provider, provider_service)
         self.assertIsNotNone(items[1].get("expiry"))
 
-    def test_ingest_item_sync_if_missing_from_elastic(self):
-        provider, provider_service = self.setup_reuters_provider()
-        item = provider_service.fetch_ingest(reuters_guid)[0]
+    async def test_ingest_item_sync_if_missing_from_elastic(self):
+        provider, provider_service = await self.setup_reuters_provider()
+        item = (await provider_service.fetch_ingest(reuters_guid))[0]
         # insert in mongo
         ids = self.app.data._backend("ingest").insert("ingest", [item])
         # check that item is not in elastic
         elastic_item = self.app.data._search_backend("ingest").find_one("ingest", _id=ids[0], req=None)
         self.assertIsNone(elastic_item)
         # trigger sync by fetch
-        old_item = get_resource_service("ingest").find_one(_id=ids[0], req=None)
+        old_item = await get_resource_service("ingest").find_one_async(_id=ids[0], req=None)
         self.assertIsNotNone(old_item)
         # check that item is synced in elastic
         elastic_item = self.app.data._search_backend("ingest").find_one("ingest", _id=ids[0], req=None)
         self.assertIsNotNone(elastic_item)
 
-    def test_ingest_provider_closed_raises_exception(self):
+    async def test_ingest_provider_closed_raises_exception(self):
         provider = {
             "name": "aap",
             "is_closed": True,
@@ -116,36 +117,36 @@ class UpdateIngestTest(TestCase):
 
         with self.assertRaises(SuperdeskApiError) as error_context:
             aap = self._get_provider_service(provider)
-            aap.update(provider, {})
+            await aap.update(provider, {})
         ex = error_context.exception
         self.assertTrue(ex.status_code == 500)
 
-    def test_ingest_provider_closed_when_critical_error_raised(self):
+    async def test_ingest_provider_closed_when_critical_error_raised(self):
         provider_name = "AAP"
-        provider = self._get_provider(provider_name)
+        provider = await self._get_provider(provider_name)
         self.assertFalse(provider.get("is_closed"))
         provider_service = self._get_provider_service(provider)
         provider_service.provider = provider
-        provider_service.close_provider(provider, ProviderError.anpaError())
-        provider = self._get_provider(provider_name)
+        await provider_service.close_provider(provider, ProviderError.anpaError())
+        provider = await self._get_provider(provider_name)
         self.assertTrue(provider.get("is_closed"))
 
-    def test_ingest_provider_calls_close_provider(self):
+    async def test_ingest_provider_calls_close_provider(self):
         def mock_update(provider, update):
             raise ProviderError.anpaError()
 
         provider_name = "AAP"
-        provider = self._get_provider(provider_name)
+        provider = await self._get_provider(provider_name)
         self.assertFalse(provider.get("is_closed"))
         provider_service = self._get_provider_service(provider)
         provider_service.provider = provider
         provider_service._update = mock_update
         with self.assertRaises(ProviderError):
-            provider_service.update(provider, {})
-        provider = self._get_provider(provider_name)
+            await provider_service.update(provider, {})
+        provider = await self._get_provider(provider_name)
         self.assertTrue(provider.get("is_closed"))
 
-    def test_is_scheduled(self):
+    async def test_is_scheduled(self):
         self.assertTrue(is_scheduled({}), "run after create")
         self.assertFalse(is_scheduled({"last_updated": utcnow()}), "wait default time 5m")
         self.assertTrue(is_scheduled({"last_updated": utcnow() - timedelta(minutes=6)}), "run after 5m")
@@ -158,30 +159,30 @@ class UpdateIngestTest(TestCase):
             "and run eventually",
         )
 
-    def test_change_last_updated(self):
+    @patch("superdesk.io.feeding_services.file_service.FileFeedingService._test")
+    async def test_change_last_updated(self, *mocks):
         ingest_provider = {"name": "test", "feeding_service": "file", "feed_parser": "nitf", "_etag": "test"}
-        self.app.data.insert("ingest_providers", [ingest_provider])
-
-        update_provider(ingest_provider)
-        provider = self.app.data.find_one("ingest_providers", req=None, _id=ingest_provider["_id"])
+        await test_utils.post_items("ingest_providers", [ingest_provider])
+        await update_provider(ingest_provider)
+        provider = await test_utils.find_by_id("ingest_providers", ingest_provider["_id"])
         self.assertGreaterEqual(utcnow(), provider.get("last_updated"))
         self.assertEqual("test", provider.get("_etag"))
 
-    def test_filter_expired_items(self):
-        provider, provider_service = self.setup_reuters_provider()
-        items = provider_service.fetch_ingest(reuters_guid)
+    async def test_filter_expired_items(self):
+        provider, provider_service = await self.setup_reuters_provider()
+        items = await provider_service.fetch_ingest(reuters_guid)
         for item in items[:4]:
             item["expiry"] = utcnow() + timedelta(minutes=11)
-        self.assertEqual(4, len(filter_expired_items(provider, items)))
+        self.assertEqual(4, len(await filter_expired_items(provider, items)))
 
-    def test_filter_expired_items_with_no_expiry(self):
-        provider, provider_service = self.setup_reuters_provider()
-        items = provider_service.fetch_ingest(reuters_guid)
-        self.assertEqual(0, len(filter_expired_items(provider, items)))
+    async def test_filter_expired_items_with_no_expiry(self):
+        provider, provider_service = await self.setup_reuters_provider()
+        items = await provider_service.fetch_ingest(reuters_guid)
+        self.assertEqual(0, len(await filter_expired_items(provider, items)))
 
-    def test_query_getting_expired_content(self):
-        provider, provider_service = self.setup_reuters_provider()
-        items = provider_service.fetch_ingest(reuters_guid)
+    async def test_query_getting_expired_content(self):
+        provider, provider_service = await self.setup_reuters_provider()
+        items = await provider_service.fetch_ingest(reuters_guid)
         now = utcnow()
         for i, item in enumerate(items):
             item["ingest_provider"] = provider["_id"]
@@ -191,14 +192,13 @@ class UpdateIngestTest(TestCase):
 
             item["expiry"] = item["versioncreated"] = expiry_time
 
-        service = get_resource_service("ingest")
-        service.post(items)
+        await get_resource_service("ingest").post_async(items)
         expiredItems = get_expired_items(provider, "ingest")
         self.assertEqual(5, expiredItems.count())
 
-    def test_expiring_with_content(self):
-        provider, provider_service = self.setup_reuters_provider()
-        items = provider_service.fetch_ingest(reuters_guid)
+    async def test_expiring_with_content(self):
+        provider, provider_service = await self.setup_reuters_provider()
+        items = await provider_service.fetch_ingest(reuters_guid)
         now = utcnow()
         for i, item in enumerate(items):
             item["ingest_provider"] = provider["_id"]
@@ -209,24 +209,24 @@ class UpdateIngestTest(TestCase):
             item["expiry"] = item["versioncreated"] = expiry_time
 
         service = get_resource_service("ingest")
-        service.post(items)
+        await service.post_async(items)
 
         # ingest the items and expire them
-        before = service.get(req=None, lookup={})
-        self.assertEqual(6, before.count())
+        before = await service.get_async(req=None, lookup={})
+        self.assertEqual(6, await before.count())
 
         remove = RemoveExpiredContent()
-        remove.run(provider.get("type"))
+        await remove.run(provider.get("type"))
 
         # only one left in ingest
-        after = service.get(req=None, lookup={})
-        self.assertEqual(1, after.count())
+        after = await service.get_async(req=None, lookup={})
+        self.assertEqual(1, await after.count())
 
         req = ParsedRequest()
         self.assertEqual(1, self.app.data.elastic.find("ingest", req, {})[1])
         self.assertEqual(1, self.app.data.mongo.find("ingest", req, {})[1])
 
-    def test_removing_expired_items_from_elastic_only(self):
+    async def test_removing_expired_items_from_elastic_only(self):
         now = utcnow()
         self.app.data.elastic.insert(
             "ingest",
@@ -236,12 +236,12 @@ class UpdateIngestTest(TestCase):
             ],
         )
 
-        RemoveExpiredContent().run()
+        await RemoveExpiredContent().run()
         self.assertEqual(1, self.app.data.elastic.find("ingest", ParsedRequest(), {})[1])
 
-    def test_expiring_content_with_files(self):
-        provider, provider_service = self.setup_reuters_provider()
-        items = provider_service.fetch_ingest(reuters_guid)
+    async def test_expiring_content_with_files(self):
+        provider, provider_service = await self.setup_reuters_provider()
+        items = await provider_service.fetch_ingest(reuters_guid)
         for item in items:
             item["ingest_provider"] = provider["_id"]
 
@@ -252,40 +252,40 @@ class UpdateIngestTest(TestCase):
         items[5]["versioncreated"] = now + timedelta(minutes=11)
 
         # ingest the items and expire them
-        self.ingest_items(items, provider, provider_service)
+        await self.ingest_items(items, provider, provider_service)
 
         # four files in grid fs
         current_files = self.app.media.storage().fs("upload").find()
-        self.assertEqual(4, current_files.count())
+        self.assertEqual(4, len(list(current_files)))
 
         with patch("superdesk.io.commands.remove_expired_content.utcnow", return_value=now + timedelta(hours=20)):
             remove = RemoveExpiredContent()
-            remove.run(provider.get("type"))
+            await remove.run(provider.get("type"))
 
         # all gone
         current_files = self.app.media.storage().fs("upload").find()
-        self.assertEqual(0, current_files.count())
+        self.assertEqual(0, len(list(current_files)))
 
-    def test_apply_rule_set(self):
+    async def test_apply_rule_set(self):
         item = {"body_html": "@@body@@"}
 
         provider_name = "reuters"
-        provider = self._get_provider(provider_name)
-        self.assertEqual("body", apply_rule_set(item, provider)["body_html"])
+        provider = await self._get_provider(provider_name)
+        self.assertEqual("body", (await apply_rule_set(item, provider))["body_html"])
 
         item = {"body_html": "@@body@@"}
         provider_name = "AAP"
-        provider = self._get_provider(provider_name)
-        self.assertEqual("@@body@@", apply_rule_set(item, provider)["body_html"])
+        provider = await self._get_provider(provider_name)
+        self.assertEqual("@@body@@", (await apply_rule_set(item, provider))["body_html"])
 
-    def test_all_ingested_items_have_sequence(self):
-        provider, provider_service = self.setup_reuters_provider()
+    async def test_all_ingested_items_have_sequence(self):
+        provider, provider_service = await self.setup_reuters_provider()
         guid = "tag_reuters.com_2014_newsml_KBN0FL0NM:10"
-        item = provider_service.fetch_ingest(guid)[0]
-        get_resource_service("ingest").set_ingest_provider_sequence(item, provider)
+        item = (await provider_service.fetch_ingest(guid))[0]
+        await get_resource_service("ingest").set_ingest_provider_sequence_async(item, provider)
         self.assertIsNotNone(item["ingest_provider_sequence"])
 
-    def test_get_task_ttl(self):
+    async def test_get_task_ttl(self):
         self.assertEqual(300, get_task_ttl({}))
         provider = {"update_schedule": {"minutes": 10}}
         self.assertEqual(600, get_task_ttl(provider))
@@ -293,11 +293,11 @@ class UpdateIngestTest(TestCase):
         provider["update_schedule"]["minutes"] = 1
         self.assertEqual(3660, get_task_ttl(provider))
 
-    def test_get_task_id(self):
+    async def test_get_task_id(self):
         provider = {"name": "foo", "_id": "abc"}
         self.assertEqual("update-ingest-foo-abc", get_task_id(provider))
 
-    def test_is_idle(self):
+    async def test_is_idle(self):
         provider = dict(idle_time=dict(hours=1, minutes=0))
         provider["last_item_update"] = utcnow()
         self.assertEqual(get_is_idle(provider), False)
@@ -306,30 +306,30 @@ class UpdateIngestTest(TestCase):
         provider["idle_time"] = dict(hours=0, minutes=0)
         self.assertEqual(get_is_idle(provider), False)
 
-    def test_files_dont_duplicate_ingest(self):
-        provider, provider_service = self.setup_reuters_provider()
-        items = provider_service.fetch_ingest(reuters_guid)
+    async def test_files_dont_duplicate_ingest(self):
+        provider, provider_service = await self.setup_reuters_provider()
+        items = await provider_service.fetch_ingest(reuters_guid)
 
         for item in items:
             item["ingest_provider"] = provider["_id"]
             item["expiry"] = utcnow() + timedelta(hours=11)
 
         # ingest the items
-        self.ingest_items(items, provider, provider_service)
+        await self.ingest_items(items, provider, provider_service)
 
-        items = provider_service.fetch_ingest(reuters_guid)
+        items = await provider_service.fetch_ingest(reuters_guid)
         for item in items:
             item["ingest_provider"] = provider["_id"]
             item["expiry"] = utcnow() + timedelta(hours=11)
 
         # ingest them again
-        self.ingest_items(items, provider, provider_service)
+        await self.ingest_items(items, provider, provider_service)
 
         # 12 files in grid fs
         current_files = self.app.media.storage().fs("upload").find()
-        self.assertEqual(12, current_files.count())
+        self.assertEqual(12, len(list(current_files)))
 
-    def test_anpa_category_to_subject_derived_ingest(self):
+    async def test_anpa_category_to_subject_derived_ingest(self):
         vocab = [
             {
                 "_id": "categories",
@@ -339,17 +339,17 @@ class UpdateIngestTest(TestCase):
         self.app.data.insert("vocabularies", vocab)
 
         provider_name = "DPA"
-        provider = get_resource_service("ingest_providers").find_one(name=provider_name, req=None)
+        provider = await test_utils.find_one("ingest_providers", name=provider_name)
         file_path = os.path.join(provider.get("config", {}).get("path", ""), "IPTC7901_odd_charset.txt")
         provider_service = self._get_provider_service(provider)
-        feeding_parser = provider_service.get_feed_parser(provider)
-        items = [feeding_parser.parse(file_path, provider)]
+        feeding_parser = await provider_service.get_feed_parser(provider)
+        items = [await feeding_parser.parse(file_path, provider)]
 
         # ingest the items and check the subject code has been derived
-        self.ingest_items(items, provider, provider_service)
+        await self.ingest_items(items, provider, provider_service)
         self.assertEqual(items[0]["subject"][0]["qcode"], "15000000")
 
-    def test_anpa_category_to_subject_derived_ingest_ignores_inactive_categories(self):
+    async def test_anpa_category_to_subject_derived_ingest_ignores_inactive_categories(self):
         vocab = [
             {
                 "_id": "categories",
@@ -359,17 +359,17 @@ class UpdateIngestTest(TestCase):
         self.app.data.insert("vocabularies", vocab)
 
         provider_name = "DPA"
-        provider = get_resource_service("ingest_providers").find_one(name=provider_name, req=None)
+        provider = await test_utils.find_one("ingest_providers", name=provider_name)
         file_path = os.path.join(provider.get("config", {}).get("path", ""), "IPTC7901_odd_charset.txt")
         provider_service = self._get_provider_service(provider)
-        feeding_parser = provider_service.get_feed_parser(provider)
-        items = [feeding_parser.parse(file_path, provider)]
+        feeding_parser = await provider_service.get_feed_parser(provider)
+        items = [await feeding_parser.parse(file_path, provider)]
 
         # ingest the items and check the subject code has been derived
-        self.ingest_items(items, provider, provider_service)
+        await self.ingest_items(items, provider, provider_service)
         self.assertNotIn("subject", items[0])
 
-    def test_subject_to_anpa_category_derived_ingest(self):
+    async def test_subject_to_anpa_category_derived_ingest(self):
         vocab = [
             {
                 "_id": "iptc_category_map",
@@ -393,24 +393,24 @@ class UpdateIngestTest(TestCase):
         self.app.data.insert("vocabularies", vocab)
 
         provider_name = "AAP"
-        provider = get_resource_service("ingest_providers").find_one(name=provider_name, req=None)
+        provider = await test_utils.find_one("ingest_providers", name=provider_name)
         file_path = os.path.join(provider.get("config", {}).get("path", ""), "nitf-fishing.xml")
         provider_service = self._get_provider_service(provider)
-        feeding_parser = provider_service.get_feed_parser(provider)
+        feeding_parser = await provider_service.get_feed_parser(provider)
         with open(file_path, "r") as f:
             xml_string = etree.etree.fromstring(f.read())
-            items = [feeding_parser.parse(xml_string, provider)]
+            items = [await feeding_parser.parse(xml_string, provider)]
             for item in items:
                 item["ingest_provider"] = provider["_id"]
                 item["expiry"] = utcnow() + timedelta(hours=11)
                 item["language"] = "fr"
 
             # ingest the items and check the subject code has been derived
-            self.ingest_items(items, provider, provider_service)
+            await self.ingest_items(items, provider, provider_service)
             self.assertEqual(items[0]["anpa_category"][0]["qcode"], "f")
             self.assertEqual(items[0]["anpa_category"][0]["name"], "Finance FR")
 
-    def test_subject_to_anpa_category_derived_ingest_ignores_inactive_map_entries(self):
+    async def test_subject_to_anpa_category_derived_ingest_ignores_inactive_map_entries(self):
         vocab = [
             {
                 "_id": "iptc_category_map",
@@ -426,55 +426,55 @@ class UpdateIngestTest(TestCase):
         self.app.data.insert("vocabularies", vocab)
 
         provider_name = "AAP"
-        provider = get_resource_service("ingest_providers").find_one(name=provider_name, req=None)
+        provider = await test_utils.find_one("ingest_providers", name=provider_name)
         file_path = os.path.join(provider.get("config", {}).get("path", ""), "nitf-fishing.xml")
         provider_service = self._get_provider_service(provider)
-        feeding_parser = provider_service.get_feed_parser(provider)
+        feeding_parser = await provider_service.get_feed_parser(provider)
         with open(file_path, "r") as f:
             xml_string = etree.etree.fromstring(f.read())
-            items = [feeding_parser.parse(xml_string, provider)]
+            items = [await feeding_parser.parse(xml_string, provider)]
             for item in items:
                 item["ingest_provider"] = provider["_id"]
                 item["expiry"] = utcnow() + timedelta(hours=11)
 
             # ingest the items and check the subject code has been derived
-            self.ingest_items(items, provider, provider_service)
+            await self.ingest_items(items, provider, provider_service)
             self.assertNotIn("anpa_category", items[0])
 
-    def test_ingest_cancellation(self):
-        provider, provider_service = self.setup_reuters_provider()
+    async def test_ingest_cancellation(self):
+        provider, provider_service = await self.setup_reuters_provider()
         guid = "tag_reuters.com_2016_newsml_L1N14N0FF:978556838"
-        items = provider_service.fetch_ingest(guid)
+        items = await provider_service.fetch_ingest(guid)
         for item in items:
             item["ingest_provider"] = provider["_id"]
             item["expiry"] = utcnow() + timedelta(hours=11)
-        self.ingest_items(items, provider, provider_service)
+        await self.ingest_items(items, provider, provider_service)
         guid = "tag_reuters.com_2016_newsml_L1N14N0FF:1542761538"
-        items = provider_service.fetch_ingest(guid)
+        items = await provider_service.fetch_ingest(guid)
         for item in items:
             item["ingest_provider"] = provider["_id"]
             item["expiry"] = utcnow() + timedelta(hours=11)
-        self.ingest_items(items, provider, provider_service)
+        await self.ingest_items(items, provider, provider_service)
         ingest_service = get_resource_service("ingest")
         lookup = {"uri": items[0].get("uri")}
-        family_members = ingest_service.get_from_mongo(req=None, lookup=lookup)
-        self.assertEqual(family_members.count(), 2)
-        for relative in family_members:
+        family_members = await ingest_service.get_from_mongo_async(req=None, lookup=lookup)
+        self.assertEqual(await family_members.count(), 2)
+        async for relative in family_members:
             self.assertEqual(relative["pubstatus"], "canceled")
             self.assertEqual(relative["state"], "killed")
 
-    def test_ingest_update(self):
-        provider, provider_service = self.setup_reuters_provider()
-        items = provider_service.fetch_ingest(reuters_guid)
+    async def test_ingest_update(self):
+        provider, provider_service = await self.setup_reuters_provider()
+        items = await provider_service.fetch_ingest(reuters_guid)
         items[0]["ingest_provider"] = provider["_id"]
         items[0]["expiry"] = utcnow() + timedelta(hours=11)
 
-        self.ingest_items(items, provider, provider_service)
+        await self.ingest_items(items, provider, provider_service)
 
         self.assertEqual(items[0]["unique_id"], 1)
         original_id = items[0]["_id"]
 
-        items = provider_service.fetch_ingest(reuters_guid)
+        items = await provider_service.fetch_ingest(reuters_guid)
         items[0]["ingest_provider"] = provider["_id"]
         items[0]["expiry"] = utcnow() + timedelta(hours=11)
         # change the headline
@@ -483,7 +483,7 @@ class UpdateIngestTest(TestCase):
         items[0]["version"] = 11
 
         # ingest the item again
-        self.ingest_items(items, provider, provider_service)
+        await self.ingest_items(items, provider, provider_service)
 
         # see the update to the headline and unique_id survives
         elastic_item = self.app.data._search_backend("ingest").find_one("ingest", _id=original_id, req=None)
@@ -491,15 +491,15 @@ class UpdateIngestTest(TestCase):
         self.assertEqual(elastic_item["unique_id"], 1)
         self.assertEqual(elastic_item["unique_name"], "#1")
 
-    def test_get_article_ids(self):
+    async def test_get_article_ids(self):
         provider_name = "reuters"
-        provider, provider_service = self.setup_reuters_provider()
-        ids = provider_service._get_article_ids("channel1", utcnow(), utcnow() + timedelta(minutes=-10))
+        provider, provider_service = await self.setup_reuters_provider()
+        ids = await provider_service._get_article_ids("channel1", utcnow(), utcnow() + timedelta(minutes=-10))
         self.assertEqual(len(ids), 3)
-        provider = get_resource_service("ingest_providers").find_one(name=provider_name, req=None)
+        provider = await test_utils.find_one("ingest_providers", name=provider_name)
         self.assertEqual(provider["tokens"]["poll_tokens"]["channel1"], "ExwaY31kfnR2Z2J1cWZ2YnxoYH9kfw==")
 
-    def test_unknown_category_ingested_is_removed(self):
+    async def test_unknown_category_ingested_is_removed(self):
         vocab = [
             {
                 "_id": "categories",
@@ -513,22 +513,22 @@ class UpdateIngestTest(TestCase):
         self.app.data.insert("vocabularies", vocab)
 
         provider_name = "AP"
-        provider = get_resource_service("ingest_providers").find_one(name=provider_name, req=None)
+        provider = await test_utils.find_one("ingest_providers", name=provider_name)
         file_path = os.path.join(provider.get("config", {}).get("path", ""), "ap_anpa-3.tst")
         provider_service = self._get_provider_service(provider)
-        feeding_parser = provider_service.get_feed_parser(provider)
-        items = [feeding_parser.parse(file_path, provider)]
+        feeding_parser = await provider_service.get_feed_parser(provider)
+        items = [await feeding_parser.parse(file_path, provider)]
 
         # ingest the items and check the subject code has been derived
         items[0]["versioncreated"] = utcnow()
-        self.ingest_items(items, provider, provider_service)
+        await self.ingest_items(items, provider, provider_service)
         self.assertTrue(len(items[0]["anpa_category"]) == 0)
 
-    def test_ingest_with_routing_keeps_elastic_in_sync(self):
-        provider, provider_service = self.setup_reuters_provider()
+    async def test_ingest_with_routing_keeps_elastic_in_sync(self):
+        provider, provider_service = await self.setup_reuters_provider()
 
         desk = {"name": "foo"}
-        self.app.data.insert("desks", [desk])
+        await test_utils.post_items("desks", [desk])
         self.assertIsNotNone(desk["_id"])
         self.assertIsNotNone(desk["incoming_stage"])
 
@@ -596,19 +596,19 @@ class UpdateIngestTest(TestCase):
         }
 
         ingest_service = get_resource_service("ingest")
-        self.ingest_items(items, provider, provider_service, routing_scheme=routing_scheme)
+        await self.ingest_items(items, provider, provider_service, routing_scheme=routing_scheme)
 
-        self.assertEqual(4, ingest_service.get_from_mongo(None, {}).count())
-        self.assertEqual(4, ingest_service.get(None, {}).count())
+        self.assertEqual(4, await ingest_service.count_async({}))
+        self.assertEqual(4, await ingest_service.count_async({}))
 
         for item in items:
             lookup = {"guid": item["guid"]}
-            mongo_item = ingest_service.get_from_mongo(None, lookup)[0]
-            elastic_item = ingest_service.get(None, lookup)[0]
+            mongo_item = await (await ingest_service.get_from_mongo_async(None, lookup)).next()
+            elastic_item = await (await ingest_service.get_async(None, lookup)).next()
             self.assertEqual(mongo_item["_etag"], elastic_item["_etag"], mongo_item["guid"])
 
     @patch("superdesk.media.renditions.download_file_from_url", get_file)
-    def test_ingest_associated_item_renditions(self):
+    async def test_ingest_associated_item_renditions(self):
         provider = {"feeding_service": "ninjs", "_id": self.providers["ninjs"]}
         provider_service = FileFeedingService()
         item = {
@@ -648,26 +648,26 @@ class UpdateIngestTest(TestCase):
         # avoid transfer_renditions call which would store the picture locally
         # and it would fetch it using superdesk url which doesn't work in test
         with patch("superdesk.io.commands.update_ingest.transfer_renditions"):
-            status, ids = ingest_item(item, provider, provider_service)
+            status, ids = await ingest_item(item, provider, provider_service)
 
         self.assertTrue(status)
         self.assertEqual(3, len(ids))
         self.assertIn("thumbnail", item["associations"]["featuremedia"]["renditions"])
         self.assertIn("thumbnail", item["associations"]["foo"]["renditions"])
 
-    def test_ingest_profile_if_exists(self):
-        provider, provider_service = self.setup_reuters_provider()
-        items = provider_service.fetch_ingest(reuters_guid)
-        ingest_item(items[0], provider, provider_service)
+    async def test_ingest_profile_if_exists(self):
+        provider, provider_service = await self.setup_reuters_provider()
+        items = await provider_service.fetch_ingest(reuters_guid)
+        await ingest_item(items[0], provider, provider_service)
         self.assertEqual("composite", items[0].get("profile"))
 
         content_types = [{"_id": "story", "name": "story"}]
-        self.app.data.insert("content_types", content_types)
+        await test_utils.post_items("content_types", content_types)
         items[1]["profile"] = "story"
-        ingest_item(items[1], provider, provider_service)
+        await ingest_item(items[1], provider, provider_service)
         self.assertEqual("story", items[1].get("profile"))
 
-    def test_edited_planning_item_is_not_update(self):
+    async def test_edited_planning_item_is_not_update(self):
         item = {
             "guid": "urn:onclusive:4112034",
             "type": "event",
@@ -688,7 +688,8 @@ class UpdateIngestTest(TestCase):
                 "all_day": True,
             },
         }
-        flask.g.user = {"_id": "current_user_id"}
+        await test_utils.post_items("users", [fixtures.users.admin()])
+        g.user = {"_id": fixtures.users.ADMIN_USER_ID}
 
         provider = {
             "_id": "asdnjsandkajsdnjkasnd",
@@ -700,26 +701,26 @@ class UpdateIngestTest(TestCase):
         events_post_service = get_resource_service("events_post")
 
         # ingest first version
-        ingested, ids = ingest_item(item, provider=provider, feeding_service={})
+        ingested, ids = await ingest_item(item, provider=provider, feeding_service={})
         self.assertTrue(ingested)
         self.assertIn(item["guid"], ids)
 
-        dest = list(event_service.get_from_mongo(req=None, lookup={"guid": item["guid"]}))[0]
+        dest = await (await event_service.get_from_mongo_async(req=None, lookup={"guid": item["guid"]})).next()
         self.assertEqual(dest["name"], "Annual Forum on Anti-Money Laundering and Financial Crime")
         self.assertEqual(dest["state"], "ingested")
         self.assertEqual(dest.get("version_creator"), None)
 
         # edit event
-        event_service.patch(dest["_id"], {"name": "Edit event Name", "update_method": "single"})
-        dest = list(event_service.get_from_mongo(req=None, lookup={"guid": item["guid"]}))[0]
-        self.assertEqual(dest.get("version_creator"), "current_user_id")
+        await event_service.patch_async(dest["_id"], {"name": "Edit event Name", "update_method": "single"})
+        dest = await (await event_service.get_from_mongo_async(req=None, lookup={"guid": item["guid"]})).next()
+        self.assertEqual(dest.get("version_creator"), fixtures.users.ADMIN_USER_ID)
 
         # update event
-        ingested, ids = ingest_item(item, provider=provider, feeding_service={})
+        ingested, ids = await ingest_item(item, provider=provider, feeding_service={})
         self.assertTrue(ingested)
         self.assertIn(item["guid"], ids)
 
-    def test_unpublished_event_is_not_update(self):
+    async def test_unpublished_event_is_not_update(self):
         item = {
             "guid": "urn:onclusive:411202222",
             "type": "event",
@@ -740,7 +741,8 @@ class UpdateIngestTest(TestCase):
                 "all_day": True,
             },
         }
-        flask.g.user = {"_id": "current_user_id"}
+        await test_utils.post_items("users", [fixtures.users.admin()])
+        g.user = {"_id": fixtures.users.ADMIN_USER_ID}
 
         provider = {
             "_id": "asdnjsandkajsdnjkasnd",
@@ -752,12 +754,12 @@ class UpdateIngestTest(TestCase):
         events_post_service = get_resource_service("events_post")
 
         # ingest first version
-        ingested, ids = ingest_item(item, provider=provider, feeding_service={})
+        ingested, ids = await ingest_item(item, provider=provider, feeding_service={})
         self.assertTrue(ingested)
         self.assertIn(item["guid"], ids)
 
         # post an event
-        events_post_service.post(
+        await events_post_service.post_async(
             [
                 {
                     "event": item["_id"],
@@ -770,7 +772,7 @@ class UpdateIngestTest(TestCase):
         self.assertEqual(dest.get("state"), "scheduled")
 
         # Un-post an event
-        events_post_service.post(
+        await events_post_service.post_async(
             [
                 {
                     "event": item["_id"],
@@ -783,6 +785,6 @@ class UpdateIngestTest(TestCase):
         self.assertEqual(dest.get("state"), "killed")
 
         # update an event
-        ingested, ids = ingest_item(item, provider=provider, feeding_service={})
+        ingested, ids = await ingest_item(item, provider=provider, feeding_service={})
         self.assertFalse(ingested)
         self.assertEqual([], ids)

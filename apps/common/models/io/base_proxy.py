@@ -9,8 +9,9 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 from .data_layer import DataLayer
-from eve.utils import ParsedRequest, config, document_etag
-from eve import ID_FIELD
+from eve.utils import ParsedRequest, document_etag
+
+from superdesk.resource_fields import ID_FIELD, ETAG
 
 
 class BaseProxy(DataLayer):
@@ -23,13 +24,19 @@ class BaseProxy(DataLayer):
         self.data_layer = data_layer
 
     def etag(self, doc):
-        return doc.get(config.ETAG, document_etag(doc))
+        return doc.get(ETAG, document_etag(doc))
 
-    def find_one(self, resource, filter, projection):
+    def find_one(self, resource, filter, projection, **options):
         req = ParsedRequest()
         req.args = {}
         req.projection = projection
         return self.data_layer.find_one(resource, req, **filter)
+
+    async def find_one_async(self, resource, filter, projection, **options):
+        req = ParsedRequest()
+        req.args = {}
+        req.projection = projection
+        return await self.data_layer.find_one_async(resource, req, **filter)
 
     def find(self, resource, lookup, projection, **options):
         req = ParsedRequest()
@@ -37,11 +44,23 @@ class BaseProxy(DataLayer):
         req.projection = projection
         return self.data_layer.get(resource, req, lookup)
 
+    async def find_async(self, resource, lookup, projection, **options):
+        req = ParsedRequest()
+        req.args = {}
+        req.projection = projection
+        return await self.data_layer.get_async(resource, req, lookup)
+
     def create(self, resource, docs):
         return self.data_layer.create(resource, docs)
 
+    async def create_async(self, resource, docs):
+        return await self.data_layer.create_async(resource, docs)
+
     def update(self, resource, filter, doc):
         return self._update(resource, filter, doc)
+
+    async def update_async(self, resource, filter, doc):
+        return await self._update_async(resource, filter, doc)
 
     def replace(self, resource, filter, doc):
         return self._update(resource, filter, doc, method="replace")
@@ -49,11 +68,23 @@ class BaseProxy(DataLayer):
     def delete(self, resource, filter):
         return self.data_layer.delete(resource, filter)
 
+    async def delete_async(self, resource, filter):
+        return await self.data_layer.delete_async(resource, filter)
+
     def _update(self, resource, filter, doc, method="update"):
         _id = doc.pop(ID_FIELD, None)
         original = self.find_one(resource, filter, None)
         filter[ID_FIELD] = original[ID_FIELD]  # make sure it's correct type
         updates = doc.copy()
         res = getattr(self.data_layer, method)(resource, filter[ID_FIELD], updates, original)
+        doc.setdefault(ID_FIELD, _id)
+        return res
+
+    async def _update_async(self, resource, filter, doc, method="update_async"):
+        _id = doc.pop(ID_FIELD, None)
+        original = await self.find_one_async(resource, filter, None)
+        filter[ID_FIELD] = original[ID_FIELD]  # make sure it's correct type
+        updates = doc.copy()
+        res = await getattr(self.data_layer, method)(resource, filter[ID_FIELD], updates, original)
         doc.setdefault(ID_FIELD, _id)
         return res

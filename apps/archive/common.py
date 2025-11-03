@@ -12,17 +12,18 @@ from typing import Optional
 from bson import ObjectId
 
 import logging
-from eve.utils import config
 from datetime import datetime
 from dateutil.parser import parse as date_parse
-from flask import current_app as app
 from eve.versioning import insert_versioning_documents
 from pytz import timezone
 from copy import deepcopy
 from dateutil.parser import parse
 
+from superdesk.core import get_app_config, get_current_app
+from superdesk.resource_fields import ID_FIELD, VERSION
 import superdesk
 from superdesk import editor_utils
+from superdesk.types.desks import DesksResourceModel
 from superdesk.users.services import get_sign_off
 from superdesk.utc import utcnow, get_expiry_date, local_to_utc, get_date
 from superdesk import get_resource_service
@@ -49,7 +50,7 @@ from superdesk.metadata.utils import generate_guid
 from superdesk.errors import SuperdeskApiError, IdentifierGenerationError
 from superdesk.logging import logger
 from apps.auth import get_user, get_auth  # noqa
-from flask_babel import _
+from quart_babel import gettext as _
 
 
 logger = logging.getLogger(__name__)
@@ -157,21 +158,21 @@ DEFAULT_PROFILES = set(
 
 
 def get_default_source():
-    return app.config.get("DEFAULT_SOURCE_VALUE_FOR_MANUAL_ARTICLES", "")
+    return get_app_config("DEFAULT_SOURCE_VALUE_FOR_MANUAL_ARTICLES", "")
 
 
 def update_version(updates, original):
     """Increment version number if possible."""
-    if config.VERSION in updates and original.get("version", 0) == 0:
-        updates.setdefault("version", updates[config.VERSION])
+    if VERSION in updates and original.get("version", 0) == 0:
+        updates.setdefault("version", updates[VERSION])
 
 
-def on_create_item(docs, repo_type=ARCHIVE, media_service=None):
+async def on_create_item(docs, repo_type=ARCHIVE, media_service=None):
     """Make sure item has basic fields populated."""
 
     for doc in docs:
         if doc.get("media") and media_service:
-            media_service.on_create([doc])
+            await media_service.on_create_async([doc])
 
         editor_utils.generate_fields(doc)
         update_dates_for(doc)
@@ -190,11 +191,11 @@ def on_create_item(docs, repo_type=ARCHIVE, media_service=None):
             doc["event_id"] = generate_guid(type=GUID_TAG)
 
         set_default_state(doc, CONTENT_STATE.DRAFT)
-        doc.setdefault(config.ID_FIELD, doc[GUID_FIELD])
+        doc.setdefault(ID_FIELD, doc[GUID_FIELD])
 
         if repo_type == ARCHIVE:
             # set the source for the article
-            set_default_source(doc)
+            await set_default_source(doc)
 
         ignore_profiles = DEFAULT_PROFILES.copy()
         ignore_profiles.add(None)
@@ -202,18 +203,19 @@ def on_create_item(docs, repo_type=ARCHIVE, media_service=None):
         if (
             doc.get("profile") in ignore_profiles
             and doc.get("type") == "text"
-            and app.config.get("DEFAULT_CONTENT_TYPE", None)
+            and get_app_config("DEFAULT_CONTENT_TYPE", None)
         ):
-            doc["profile"] = app.config["DEFAULT_CONTENT_TYPE"]
+            doc["profile"] = get_app_config("DEFAULT_CONTENT_TYPE")
 
         copy_metadata_from_profile(doc)
         copy_metadata_from_user_preferences(doc, repo_type)
 
         if "language" not in doc:
-            doc["language"] = app.config.get("DEFAULT_LANGUAGE", "en")
+            doc["language"] = get_app_config("DEFAULT_LANGUAGE", "en")
 
             if doc.get("task", None) and doc["task"].get("desk", None):
-                desk = superdesk.get_resource_service("desks").find_one(req=None, _id=doc["task"]["desk"])
+                desks_service = get_resource_service("desks")
+                desk = await desks_service.find_one_async(req=None, _id=doc["task"]["desk"])
                 if desk and desk.get("desk_language", None):
                     doc["language"] = desk["desk_language"]
 
@@ -224,7 +226,7 @@ def on_create_item(docs, repo_type=ARCHIVE, media_service=None):
             from apps.templates.content_templates import render_content_template_by_id  # avoid circular import
 
             doc.pop("fields_meta", None)
-            render_content_template_by_id(doc, doc["template"], update=True)
+            await render_content_template_by_id(doc, doc["template"], update=True)
             editor_utils.generate_fields(doc)
 
 
@@ -263,7 +265,7 @@ def format_dateline_to_locmmmddsrc(located, current_timestamp, source=None):
     )
 
 
-def set_default_source(doc):
+async def set_default_source(doc):
     """Set the source for the item.
 
     If desk level source is specified then use that source else default from global settings.
@@ -276,7 +278,9 @@ def set_default_source(doc):
     # If the item has been ingested and the source for the provider is not the same as the system default source
     # the source must be preserved as the item has been ingested from an external agency
     if doc.get("ingest_provider"):
-        provider = get_resource_service("ingest_providers").find_one(req=None, _id=doc.get("ingest_provider"))
+        provider = await get_resource_service("ingest_providers").find_one_async(
+            req=None, _id=doc.get("ingest_provider")
+        )
         if not provider:
             provider = get_resource_service("search_providers").find_one(req=None, _id=doc.get("ingest_provider"))
         if provider and provider.get("source", "") != get_default_source():
@@ -292,7 +296,8 @@ def set_default_source(doc):
 
     if desk_id:
         # if desk level source is specified then use that instead of the default source
-        desk = get_resource_service("desks").find_one(req=None, _id=desk_id)
+        # TODO-ASYNC[desks]: Use DesksResourceModel async service where when upgrading this module
+        desk = get_resource_service("desks").find_one(req=None, _id=desk_id) or {}
         source = desk.get("source") or source
 
     doc["source"] = source
@@ -303,7 +308,7 @@ def set_default_source(doc):
     set_dateline(doc, {})
 
 
-def on_duplicate_item(doc, original_doc, operation=None):
+async def on_duplicate_item(doc, original_doc, operation=None):
     """Make sure duplicated item has basic fields populated."""
 
     doc[GUID_FIELD] = generate_guid(type=GUID_NEWSML)
@@ -314,7 +319,7 @@ def on_duplicate_item(doc, original_doc, operation=None):
     doc["force_unlock"] = True
     doc[ITEM_OPERATION] = operation or ITEM_DUPLICATE
     doc["original_id"] = original_doc.get("item_id", original_doc.get("_id"))
-    set_default_source(doc)
+    await set_default_source(doc)
 
 
 def set_dateline(updates, original):
@@ -336,7 +341,7 @@ def set_dateline(updates, original):
     )
 
 
-def clear_rewritten_flag(event_id, rewrite_id, rewrite_field):
+async def clear_rewritten_flag(event_id, rewrite_id, rewrite_field):
     """Clears rewritten_by or rewrite_of field from the existing published and archive items.
 
     :param str event_id: event id of the document
@@ -346,19 +351,20 @@ def clear_rewritten_flag(event_id, rewrite_id, rewrite_field):
     publish_service = get_resource_service("published")
     archive_service = get_resource_service(ARCHIVE)
 
-    published_rewritten_stories = publish_service.get_rewritten_items_by_event_story(
+    published_rewritten_stories = await publish_service.get_rewritten_items_by_event_story(
         event_id, rewrite_id, rewrite_field
     )
     processed_items = set()
+    app = get_current_app().as_any()
     for doc in published_rewritten_stories:
-        doc_id = doc.get(config.ID_FIELD)
-        publish_service.update_published_items(doc_id, rewrite_field, None)
+        doc_id = doc.get(ID_FIELD)
+        await publish_service.update_published_items(doc_id, rewrite_field, None)
         if doc_id not in processed_items:
             # clear the flag from the archive as well.
-            archive_item = archive_service.find_one(req=None, _id=doc_id)
-            archive_service.system_update(doc_id, {rewrite_field: None}, archive_item)
+            archive_item = await archive_service.find_one_async(req=None, _id=doc_id)
+            await archive_service.system_update_async(doc_id, {rewrite_field: None}, archive_item)
             processed_items.add(doc_id)
-            app.on_archive_item_updated({rewrite_field: None}, archive_item, ITEM_UNLINK)
+            await app.on_archive_item_updated.call_async({rewrite_field: None}, archive_item, ITEM_UNLINK)
 
 
 def update_dates_for(doc):
@@ -398,7 +404,7 @@ def set_sign_off(updates, original=None, repo_type=ARCHIVE, user=None):
         return
 
     # remove the sign off from the list if already there
-    if not app.config.get("FULL_SIGN_OFF"):
+    if not get_app_config("FULL_SIGN_OFF"):
         current_sign_off = current_sign_off.replace(sign_off + "/", "")
 
     updated_sign_off = "{}/{}".format(current_sign_off, sign_off)
@@ -412,6 +418,7 @@ def generate_unique_id_and_name(item, repo_type=ARCHIVE):
     """
 
     try:
+        # TODO-ASYNC[sequences]: Use async version when upgrading this module to async
         unique_id = get_resource_service("sequences").get_next_sequence_number(
             key_name="{}_SEQ".format(repo_type.upper())
         )
@@ -443,7 +450,33 @@ def insert_into_versions(id_=None, doc=None):
         raise SuperdeskApiError.badRequestError(message=_("Document not found in archive collection"))
 
     remove_unwanted(doc_in_archive_collection)
-    if app.config["VERSION"] in doc_in_archive_collection:
+    if VERSION in doc_in_archive_collection:
+        insert_versioning_documents(ARCHIVE, doc_in_archive_collection)
+
+
+async def insert_into_versions_async(id_=None, doc=None):
+    """Insert version document.
+
+    There are some scenarios where the requests are not handled by eve. In those scenarios superdesk should be able to
+    manually manage versions. Below are some scenarios:
+
+    1.  When a user fetches content from ingest collection the request is handled by fetch API which doesn't
+        extend from ArchiveResource.
+    2.  When a user submits content to a desk the request is handled by /tasks API.
+    3.  When a user publishes a package the items of the package also needs to be published. The publishing of items
+        in the package is not handled by eve.
+    """
+
+    if id_:
+        doc_in_archive_collection = await get_resource_service(ARCHIVE).find_one_async(req=None, _id=id_)
+    else:
+        doc_in_archive_collection = doc
+
+    if not doc_in_archive_collection:
+        raise SuperdeskApiError.badRequestError(message=_("Document not found in archive collection"))
+
+    remove_unwanted(doc_in_archive_collection)
+    if VERSION in doc_in_archive_collection:
         insert_versioning_documents(ARCHIVE, doc_in_archive_collection)
 
 
@@ -460,7 +493,7 @@ def remove_unwanted(doc):
                 del doc[attr]
 
 
-def fetch_item(doc, desk_id, stage_id, state=None, target=None):
+async def fetch_item(doc, desk_id, stage_id, state=None, target=None):
     dest_doc = dict(doc)
 
     if target:
@@ -471,20 +504,20 @@ def fetch_item(doc, desk_id, stage_id, state=None, target=None):
     if doc.get("guid"):
         dest_doc.setdefault("uri", doc[GUID_FIELD])
 
-    dest_doc[config.ID_FIELD] = new_id
+    dest_doc[ID_FIELD] = new_id
     dest_doc[GUID_FIELD] = new_id
     generate_unique_id_and_name(dest_doc)
 
     # avoid circular import
     from apps.tasks import send_to
 
-    dest_doc[config.VERSION] = 1
+    dest_doc[VERSION] = 1
     dest_doc["versioncreated"] = utcnow()
-    send_to(doc=dest_doc, desk_id=desk_id, stage_id=stage_id)
+    await send_to(doc=dest_doc, desk_id=desk_id, stage_id=stage_id)
     dest_doc[ITEM_STATE] = state or CONTENT_STATE.FETCHED
 
-    dest_doc[FAMILY_ID] = doc[config.ID_FIELD]
-    dest_doc[INGEST_ID] = doc[config.ID_FIELD]
+    dest_doc[FAMILY_ID] = doc[ID_FIELD]
+    dest_doc[INGEST_ID] = doc[ID_FIELD]
     dest_doc[ITEM_OPERATION] = ITEM_FETCH
 
     remove_unwanted(dest_doc)
@@ -492,7 +525,7 @@ def fetch_item(doc, desk_id, stage_id, state=None, target=None):
     return dest_doc
 
 
-def remove_media_files(doc, published=False):
+async def remove_media_files(doc, published=False):
     """Removes the media files of the given doc.
 
     If media files are not references by any other
@@ -516,21 +549,22 @@ def remove_media_files(doc, published=False):
         logger.info("Removing media files for %s", doc.get("guid"))
 
     if doc.get("guid"):
-        remove_media_references(doc["guid"], published)
+        await remove_media_references(doc["guid"], published)
 
+    app = get_current_app()
     for renditions in references:
         for rendition in renditions.values():
             if not rendition.get("media"):
                 continue
             media = rendition.get("media") if isinstance(rendition.get("media"), str) else str(rendition.get("media"))
             try:
-                references = get_resource_service("media_references").get(
+                references = await get_resource_service("media_references").get_async(
                     req=None, lookup={"media_id": media, "published": True}
                 )
 
-                if references.count() == 0:
+                if await references.count() == 0:
                     logger.info("Deleting media:%s", media)
-                    app.media.delete(media)
+                    await app.media.delete_async(media)
                 else:
                     logger.info("Keeping media:%s due to references", media)
             except Exception:
@@ -538,12 +572,13 @@ def remove_media_files(doc, published=False):
 
     for attachment in doc.get("attachments", []):
         lookup = {"_id": attachment["attachment"]}
-        get_resource_service("attachments").delete_action(lookup)
+        await get_resource_service("attachments").delete_action_async(lookup)
 
 
-def remove_media_references(item_id, published):
-    get_resource_service("media_references").delete_action({"item_id": item_id, "published": published})
-    get_resource_service("media_references").delete_action({"associated_id": item_id, "published": published})
+async def remove_media_references(item_id, published):
+    media_references = get_resource_service("media_references")
+    await media_references.delete_action_async({"item_id": item_id, "published": published})
+    await media_references.delete_action_async({"associated_id": item_id, "published": published})
 
 
 def is_assigned_to_a_desk(doc):
@@ -569,7 +604,7 @@ def get_item_expiry(desk, stage, offset=None):
     :param datetime offset: datetime passed in case of embargo.
     :return datetime: expiry datetime
     """
-    expiry_minutes = app.settings["CONTENT_EXPIRY_MINUTES"]
+    expiry_minutes = get_app_config("CONTENT_EXPIRY_MINUTES")
     if stage and (stage.get("content_expiry") or 0) > 0:
         expiry_minutes = stage.get("content_expiry")
     elif desk and (desk.get("content_expiry") or 0) > 0:
@@ -578,7 +613,7 @@ def get_item_expiry(desk, stage, offset=None):
     return get_expiry_date(expiry_minutes, offset=offset)
 
 
-def get_expiry(desk_id, stage_id, offset=None):
+async def get_expiry(desk_id, stage_id, offset=None):
     """Calculates the expiry for an item.
 
     Fetches the expiry duration from one of the below
@@ -593,13 +628,13 @@ def get_expiry(desk_id, stage_id, offset=None):
     desk = None
 
     if desk_id:
-        desk = superdesk.get_resource_service("desks").find_one(req=None, _id=desk_id)
+        desk = await DesksResourceModel.get_service().find_by_id_raw(desk_id)
 
         if not desk:
             raise SuperdeskApiError.notFoundError(_("Invalid desk identifier {desk_id}").format(desk_id=desk_id))
 
     if stage_id:
-        stage = get_resource_service("stages").find_one(req=None, _id=stage_id)
+        stage = await get_resource_service("stages").find_one_async(req=None, _id=stage_id)
 
         if not stage:
             raise SuperdeskApiError.notFoundError(_("Invalid stage identifier {stage_id}").format(stage_id=stage_id))
@@ -607,7 +642,7 @@ def get_expiry(desk_id, stage_id, offset=None):
     return get_item_expiry(desk, stage, offset)
 
 
-def set_item_expiry(update, original):
+async def set_item_expiry(update, original):
     task = update.get("task", original.get("task", {}))
     desk_id = task.get("desk", None)
     stage_id = task.get("stage", None)
@@ -616,9 +651,9 @@ def set_item_expiry(update, original):
         return
 
     if update == {}:
-        original["expiry"] = get_expiry(desk_id, stage_id)
+        original["expiry"] = await get_expiry(desk_id, stage_id)
     else:
-        update["expiry"] = get_expiry(desk_id, stage_id)
+        update["expiry"] = await get_expiry(desk_id, stage_id)
 
 
 def update_state(original, updates, publish_from_personal=None):
@@ -787,7 +822,7 @@ def convert_task_attributes_to_objectId(doc):
         task[LAST_AUTHORING_DESK] = ObjectId(task.get(LAST_AUTHORING_DESK))
 
 
-def transtype_metadata(doc, original=None):
+async def transtype_metadata(doc, original=None):
     """Change the type of metadata coming from client to match expected type in database
 
     Some metadata (e.g. custom fields) are sent as plain text while an other type is expected in
@@ -811,7 +846,7 @@ def transtype_metadata(doc, original=None):
         logger.warning("`profile` is not available in doc")
         return
     ctypes_service = get_resource_service("content_types")
-    profile = ctypes_service.find_one(None, _id=profile_id)
+    profile = await ctypes_service.find_one_async(req=None, _id=profile_id)
     if profile is None:
         return
 
@@ -839,9 +874,9 @@ def copy_metadata_from_profile(doc):
     :param doc
     """
     defaults = {}
-    defaults.setdefault("priority", config.DEFAULT_PRIORITY_VALUE_FOR_MANUAL_ARTICLES)
-    defaults.setdefault("urgency", config.DEFAULT_URGENCY_VALUE_FOR_MANUAL_ARTICLES)
-    defaults.setdefault("genre", config.DEFAULT_GENRE_VALUE_FOR_MANUAL_ARTICLES)
+    defaults.setdefault("priority", get_app_config("DEFAULT_PRIORITY_VALUE_FOR_MANUAL_ARTICLES"))
+    defaults.setdefault("urgency", get_app_config("DEFAULT_URGENCY_VALUE_FOR_MANUAL_ARTICLES"))
+    defaults.setdefault("genre", get_app_config("DEFAULT_GENRE_VALUE_FOR_MANUAL_ARTICLES"))
     for field in defaults:
         if field in doc and not doc[field]:
             del doc[field]

@@ -1,9 +1,8 @@
 import base64
 
-from flask import render_template
-
 from . import BaseFormatter
 
+from superdesk.flask import render_template
 from superdesk.text_utils import get_text
 
 
@@ -18,7 +17,8 @@ class HtmlFormatter(BaseFormatter):
         super().__init__(id, name)
         self.template = template
 
-    def export(self, dest, show, rundown, items):
-        html = render_template(self.template, show=show, rundown=rundown, items=items)
+    # TODO-ASYNC: Support async export formatter
+    async def export(self, dest, show, rundown, items):
+        html = await render_template(self.template, show=show, rundown=rundown, items=items)
         dest["content"] = base64.b64encode(html.encode("utf-8"))
         dest["content_type"] = "text/html"

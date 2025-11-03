@@ -11,6 +11,7 @@
 from typing import NamedTuple, Literal
 from copy import deepcopy
 
+from superdesk.resource_fields import ID_FIELD
 from superdesk.resource import (
     Resource,
     not_analyzed,
@@ -21,8 +22,8 @@ from superdesk.resource import (
     string_with_analyzer,
 )
 from .packages import LINKED_IN_PACKAGES, PACKAGE
-from eve.utils import config
 from superdesk.utils import SuperdeskBaseEnum
+from superdesk.resource_fields import PUBLISH_SCHEDULE, SCHEDULE_SETTINGS  # noqa
 
 GUID_TAG = "tag"
 GUID_FIELD = "guid"
@@ -137,8 +138,6 @@ FORMATS: Formats = Formats("HTML", "preserved")
 BYLINE = "byline"
 SIGN_OFF = "sign_off"
 EMBARGO = "embargo"
-PUBLISH_SCHEDULE = "publish_schedule"
-SCHEDULE_SETTINGS = "schedule_settings"
 PROCESSED_FROM = "processed_from"
 
 # part the task dict
@@ -175,7 +174,7 @@ entity_metadata = {
 }
 
 metadata_schema = {
-    config.ID_FIELD: {"type": "string", "unique": True},
+    ID_FIELD: {"type": "string", "unique": True},
     #: Identifiers
     "guid": {"type": "string", "unique": True, "mapping": not_analyzed},
     "uri": {

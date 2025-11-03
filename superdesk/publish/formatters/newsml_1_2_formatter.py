@@ -12,7 +12,8 @@ import time
 import logging
 from lxml import etree
 from lxml.etree import SubElement
-from eve.utils import config
+
+from superdesk.resource_fields import ID_FIELD, VERSION
 from superdesk.publish.formatters import Formatter
 import superdesk
 from superdesk.errors import FormatterError
@@ -20,9 +21,10 @@ from superdesk.etree import parse_html
 from superdesk.metadata.item import ITEM_TYPE, CONTENT_TYPE, EMBARGO, ITEM_STATE, CONTENT_STATE, GUID_FIELD
 from superdesk.metadata.packages import GROUP_ID, REFS, RESIDREF, ROLE, ROOT_GROUP
 from superdesk.utc import utcnow
-from flask import current_app as app
+from superdesk.core import get_app_config
 from apps.archive.common import get_utc_schedule
 from superdesk.filemeta import get_filemeta
+from superdesk.publish_async.utils import generate_sequence_number
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,9 @@ class NewsML12Formatter(Formatter):
     """
     NewsML 1.2 Formatter
     """
+
+    # We can't cache due to the use of publish_sequence_no in formatted output.
+    use_cache = False
 
     XML_ROOT = '<?xml version="1.0"?><!DOCTYPE NewsML SYSTEM "http://www.provider.com/dtd/NewsML_1.2.dtd">'
     newml_content_type = {
@@ -47,7 +52,9 @@ class NewsML12Formatter(Formatter):
     name = "NewsML 1.2"
     type = "newsml12"
 
-    def format(self, article, subscriber, codes=None):
+    async def format(
+        self, article: dict, subscriber: dict | None, codes: list | None = None
+    ) -> list[tuple[int, str] | dict]:
         """
         Create article in NewsML1.2 format
 
@@ -59,7 +66,7 @@ class NewsML12Formatter(Formatter):
         :raises FormatterError: if the formatter fails to format an article
         """
         try:
-            pub_seq_num = superdesk.get_resource_service("subscribers").generate_sequence_number(subscriber)
+            pub_seq_num = await generate_sequence_number(subscriber)
             self.now = utcnow()
             self.string_now = self.now.strftime("%Y%m%dT%H%M%S+0000")
 
@@ -75,7 +82,7 @@ class NewsML12Formatter(Formatter):
 
             return [(pub_seq_num, self.XML_ROOT + etree.tostring(newsml, encoding=self.ENCODING).decode(self.ENCODING))]
         except Exception as ex:
-            raise FormatterError.newml12FormatterError(ex, subscriber)
+            raise await FormatterError.newml12FormatterError(ex, subscriber).send_notifications()
 
     def _format_news_envelope(self, article, news_envelope, pub_seq_num):
         """
@@ -100,12 +107,12 @@ class NewsML12Formatter(Formatter):
         identification = SubElement(news_item, "Identification")
         news_identifier = SubElement(identification, "NewsIdentifier")
         date_id = article.get("firstcreated").strftime("%Y%m%d")
-        SubElement(news_identifier, "ProviderId").text = app.config["NEWSML_PROVIDER_ID"]
+        SubElement(news_identifier, "ProviderId").text = get_app_config("NEWSML_PROVIDER_ID")
         SubElement(news_identifier, "DateId").text = date_id
         SubElement(news_identifier, "NewsItemId").text = article[GUID_FIELD]
-        SubElement(news_identifier, "RevisionId", attrib=revision).text = str(article.get(config.VERSION, ""))
+        SubElement(news_identifier, "RevisionId", attrib=revision).text = str(article.get(VERSION, ""))
         SubElement(news_identifier, "PublicIdentifier").text = self._generate_public_identifier(
-            article[config.ID_FIELD], article.get(config.VERSION, ""), revision.get("Update", "")
+            article[ID_FIELD], article.get(VERSION, ""), revision.get("Update", "")
         )
         SubElement(identification, "DateLabel").text = self.now.strftime("%A %d %B %Y")
 
@@ -129,7 +136,7 @@ class NewsML12Formatter(Formatter):
         """
         revision = {"PreviousRevision": "0", "Update": "N"}
         if article.get(ITEM_STATE) in {CONTENT_STATE.CORRECTED, CONTENT_STATE.KILLED, CONTENT_STATE.RECALLED}:
-            revision["PreviousRevision"] = str(article.get(config.VERSION) - 1)
+            revision["PreviousRevision"] = str(article.get(VERSION) - 1)
         return revision
 
     def _format_news_management(self, article, news_item):
@@ -223,6 +230,7 @@ class NewsML12Formatter(Formatter):
         :param dict article:
         :param Element main_news_component:
         """
+        # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
         rights = superdesk.get_resource_service("vocabularies").get_rightsinfo(article)
 
         rights_metadata = SubElement(main_news_component, "RightsMetadata")
@@ -407,7 +415,7 @@ class NewsML12Formatter(Formatter):
                 if RESIDREF in ref:
                     revision = self._process_revision({})
                     item_ref = self._generate_public_identifier(
-                        ref.get(RESIDREF), ref.get(config.VERSION), revision.get("Update", "")
+                        ref.get(RESIDREF), ref.get(VERSION), revision.get("Update", "")
                     )
                     SubElement(sub_news_component, "NewsItemRef", attrib={"NewsItem": item_ref})
 

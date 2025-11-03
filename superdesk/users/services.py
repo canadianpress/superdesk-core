@@ -8,14 +8,16 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
-import flask
 import logging
 from bson import ObjectId
-from flask import current_app as app
-from eve.utils import config
+
+from superdesk.resource_fields import ID_FIELD, VERSION, LAST_UPDATED
+from superdesk.core import get_app_config
+from superdesk.types import DesksResourceModel
+from superdesk.flask import g
 from superdesk.activity import add_activity, ACTIVITY_CREATE, ACTIVITY_UPDATE
 from superdesk.metadata.item import SIGN_OFF
-from superdesk.services import BaseService
+from superdesk.eve_async.service import AsyncBaseService
 from superdesk.utils import is_hashed, get_hash, compare_preferences
 from superdesk import get_resource_service
 from superdesk.emails import send_user_status_changed_email, send_activate_account_email, send_user_type_changed_email
@@ -26,6 +28,7 @@ from superdesk.users.errors import UserInactiveError, UserNotRegisteredException
 from superdesk.notification import push_notification
 from superdesk.validation import ValidationError
 from superdesk.utils import ignorecase_query
+from apps.desks_async import add_member_to_desk
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +78,9 @@ def current_user_has_privilege(privilege):
 
     :param privilege
     """
-    if not getattr(flask.g, "user", None):  # no user - worker can do it
+    if not getattr(g, "user", None):  # no user - worker can do it
         return True
-    privileges = get_privileges(flask.g.user, getattr(flask.g, "role", None))
+    privileges = get_privileges(g.user, getattr(g, "role", None))
     return privileges.get(privilege, False)
 
 
@@ -92,9 +95,16 @@ def is_sensitive_update(updates):
 
 
 def get_invisible_stages(user_id):
+    # TODO-ASYNC[users]: Remove this once it's no longer needed
     user_desks = list(get_resource_service("user_desks").get(req=None, lookup={"user_id": user_id}))
     user_desk_ids = [d["_id"] for d in user_desks]
     return get_resource_service("stages").get_stages_by_visibility(False, user_desk_ids)
+
+
+async def get_invisible_stages_async(user_id):
+    user_desks = await get_resource_service("user_desks").get_async(req=None, lookup={"user_id": user_id})
+    user_desk_ids = [d["_id"] async for d in user_desks]
+    return await get_resource_service("stages").get_stages_by_visibility_async(False, user_desk_ids)
 
 
 def set_sign_off(user):
@@ -103,7 +113,7 @@ def set_sign_off(user):
     """
 
     if SIGN_OFF not in user or user[SIGN_OFF] is None:
-        sign_off_mapping = app.config.get("SIGN_OFF_MAPPING", None)
+        sign_off_mapping = get_app_config("SIGN_OFF_MAPPING", None)
         if sign_off_mapping and sign_off_mapping in user:
             user[SIGN_OFF] = user[sign_off_mapping]
         elif SIGN_OFF in user and user[SIGN_OFF] is None:
@@ -119,7 +129,7 @@ def update_sign_off(updates):
     Update sign_off property on user if the mapped field is changed.
     """
 
-    sign_off_mapping = app.config.get("SIGN_OFF_MAPPING", None)
+    sign_off_mapping = get_app_config("SIGN_OFF_MAPPING", None)
     if sign_off_mapping and sign_off_mapping in updates:
         updates[SIGN_OFF] = updates[sign_off_mapping]
 
@@ -135,7 +145,7 @@ def get_sign_off(user):
     return user[SIGN_OFF]
 
 
-class UsersService(BaseService):
+class UsersService(AsyncBaseService):
     _updating_stage_visibility = True
 
     def __is_invalid_operation(self, user, updates, method):
@@ -149,35 +159,38 @@ class UsersService(BaseService):
         :return: error message if invalid.
         """
 
-        if "user" in flask.g:
+        if "user" in g:
             if method == "PATCH":
                 if "is_active" in updates or "is_enabled" in updates:
-                    if str(user["_id"]) == str(flask.g.user["_id"]):
+                    if str(user["_id"]) == str(g.user["_id"]):
                         return "Not allowed to change your own status"
                     elif not current_user_has_privilege("users"):
                         return "Insufficient privileges to change user state"
                 if (
-                    str(user["_id"]) != str(flask.g.user["_id"])
+                    str(user["_id"]) != str(g.user["_id"])
                     and user.get("session_preferences")
                     and is_sensitive_update(updates)
                 ):
                     return "Not allowed to change the role/user_type/privileges of a logged-in user"
-            elif method == "DELETE" and str(user["_id"]) == str(flask.g.user["_id"]):
+            elif method == "DELETE" and str(user["_id"]) == str(g.user["_id"]):
                 return "Not allowed to disable your own profile."
 
         if method == "PATCH" and is_sensitive_update(updates) and not current_user_has_privilege("users"):
             return "Insufficient privileges to update role/user_type/privileges"
 
-    def __handle_status_changed(self, updates, user):
+    async def __handle_status_changed_async(self, updates, user):
         enabled = updates.get("is_enabled", None)
         active = updates.get("is_active", None)
 
         if enabled is not None or active is not None:
-            get_resource_service("auth").delete_action({"username": user.get("username")})  # remove active tokens
+            # remove active tokens
+            await get_resource_service("auth").delete_action_async({"username": user.get("username")})
             updates["session_preferences"] = {}
 
             # send email notification
-            can_send_mail = get_resource_service("preferences").email_notification_is_enabled(user_id=user["_id"])
+            can_send_mail = await get_resource_service("preferences").email_notification_is_enabled_async(
+                user_id=user["_id"]
+            )
 
             status = ""
 
@@ -188,9 +201,9 @@ class UsersService(BaseService):
                 status = "enabled and active" if active else "enabled but inactive"
 
             if can_send_mail:
-                send_user_status_changed_email([user.get("email")], status)
+                await send_user_status_changed_email([user.get("email")], status)
 
-    def __send_notification(self, updates, user):
+    async def __send_notification(self, updates, user):
         user_id = user["_id"]
 
         if "is_enabled" in updates and not updates["is_enabled"]:
@@ -204,7 +217,7 @@ class UsersService(BaseService):
             if len(removed) > 0 or (1, 0) in modified.values():
                 push_notification("user_privileges_revoked", updated=1, user_id=str(user_id))
             if len(added) > 0:
-                add_activity(
+                await add_activity(
                     ACTIVITY_UPDATE,
                     "user {{user}} has been granted new privileges: Please re-login.",
                     self.datasource,
@@ -215,7 +228,7 @@ class UsersService(BaseService):
             if not is_admin(updates):
                 push_notification("user_type_changed", updated=1, user_id=str(user_id))
             else:
-                add_activity(
+                await add_activity(
                     ACTIVITY_UPDATE,
                     "user {{user}} is updated to administrator: Please re-login.",
                     self.datasource,
@@ -225,41 +238,44 @@ class UsersService(BaseService):
         else:
             push_notification("user", updated=1, user_id=str(user_id))
 
-    def get_avatar_renditions(self, doc):
-        renditions = get_resource_service("upload").find_one(req=None, _id=doc)
+    async def get_avatar_renditions(self, doc):
+        # TODO-ASYNC[upload]: Upgrade to async when updating the ``upload`` module
+        renditions = await get_resource_service("upload").find_one_async(req=None, _id=doc)
         return renditions.get("renditions") if renditions is not None else None
 
-    def handle_user_type_changed(self, updates, user):
+    async def handle_user_type_changed_async(self, updates, user):
         user_type = updates.get("user_type", None)
 
         if user_type is not None and user_type == "external":
-            can_send_mail = get_resource_service("preferences").email_notification_is_enabled(user_id=user["_id"])
+            can_send_mail = await get_resource_service("preferences").email_notification_is_enabled_async(
+                user_id=user["_id"]
+            )
             if can_send_mail:
-                send_user_type_changed_email([user.get("email")])
+                await send_user_type_changed_email([user.get("email")])
 
-    def on_create(self, docs):
+    async def on_create_async(self, docs):
         for user_doc in docs:
             user_doc.setdefault("password_changed_on", utcnow())
             user_doc.setdefault("display_name", get_display_name(user_doc))
             user_doc.setdefault(SIGN_OFF, set_sign_off(user_doc))
-            user_doc.setdefault("role", get_resource_service("roles").get_default_role_id())
+            user_doc.setdefault("role", await get_resource_service("roles").get_default_role_id_async())
             if user_doc.get("avatar"):
-                user_doc.setdefault("avatar_renditions", self.get_avatar_renditions(user_doc["avatar"]))
+                user_doc.setdefault("avatar_renditions", await self.get_avatar_renditions(user_doc["avatar"]))
 
             get_resource_service("preferences").set_user_initial_prefs(user_doc)
 
-    def on_created(self, docs):
+    async def on_created_async(self, docs):
         for user_doc in docs:
             self.__update_user_defaults(user_doc)
-            add_activity(
+            await add_activity(
                 ACTIVITY_CREATE,
                 "created user {{user}}",
                 self.datasource,
                 user=user_doc.get("display_name", user_doc.get("username")),
             )
-            self.update_stage_visibility_for_user(user_doc)
+            await self.update_stage_visibility_for_user_async(user_doc)
 
-    def on_update(self, updates, original):
+    async def on_update_async(self, updates, original):
         """Overriding the method to:
 
         1. Prevent user from the below:
@@ -278,16 +294,16 @@ class UsersService(BaseService):
         update_sign_off(updates)
 
         if updates.get("avatar"):
-            updates["avatar_renditions"] = self.get_avatar_renditions(updates["avatar"])
+            updates["avatar_renditions"] = await self.get_avatar_renditions(updates["avatar"])
 
-    def on_updated(self, updates, user):
+    async def on_updated_async(self, updates, user):
         if "role" in updates or "privileges" in updates:
-            get_resource_service("preferences").on_update(updates, user)
-        self.__handle_status_changed(updates, user)
-        self.handle_user_type_changed(updates, user)
-        self.__send_notification(updates, user)
+            await get_resource_service("preferences").on_update_async(updates, user)
+        await self.__handle_status_changed_async(updates, user)
+        await self.handle_user_type_changed_async(updates, user)
+        await self.__send_notification(updates, user)
 
-    def on_delete(self, user):
+    async def on_delete_async(self, user):
         """Overriding the method to prevent user from the below:
 
         1. Check if the user is updating his/her own status.
@@ -299,7 +315,7 @@ class UsersService(BaseService):
         if error_message:
             raise SuperdeskApiError.forbiddenError(message=error_message)
 
-    def delete(self, lookup):
+    async def delete_async(self, lookup):
         """
         Overriding the method to prevent from hard delete
         """
@@ -308,7 +324,7 @@ class UsersService(BaseService):
             id=ObjectId(lookup["_id"]), updates={"is_enabled": False, "is_active": False}, original=user
         )
 
-    def __clear_locked_items(self, user_id):
+    async def __clear_locked_items(self, user_id):
         archive_service = get_resource_service("archive")
         archive_autosave_service = get_resource_service("archive_autosave")
 
@@ -322,18 +338,18 @@ class UsersService(BaseService):
         user = ObjectId(user_id) if isinstance(user_id, str) else user_id
         query = {"$or": [{"lock_user": user}, {"task.user": user, "task.desk": {"$exists": False}}]}
 
-        items_locked_by_user = archive_service.get_from_mongo(req=None, lookup=query)
+        items_locked_by_user = await archive_service.get_from_mongo_async(req=None, lookup=query)
 
-        if items_locked_by_user and items_locked_by_user.count():
-            for item in items_locked_by_user:
+        if items_locked_by_user and await items_locked_by_user.count():
+            async for item in items_locked_by_user:
                 # delete the item if nothing is saved so far
-                if item[config.VERSION] == 0 and item["state"] == "draft":
-                    get_resource_service("archive").delete(lookup={"_id": item["_id"]})
+                if item[VERSION] == 0 and item["state"] == "draft":
+                    await archive_service.delete_async(lookup={"_id": item["_id"]})
                 else:
-                    archive_service.update(item["_id"], doc_to_unlock, item)
-                    archive_autosave_service.delete(lookup={"_id": item["_id"]})
+                    await archive_service.update_async(item["_id"], doc_to_unlock, item)
+                    await archive_autosave_service.delete_async(lookup={"_id": item["_id"]})
 
-    def on_deleted(self, doc):
+    async def on_deleted_async(self, doc):
         """Overriding to add to activity stream and handle user clean up.
 
         1. Authenticated Sessions
@@ -341,20 +357,20 @@ class UsersService(BaseService):
         3. Reset Password Tokens
         """
 
-        add_activity(
+        await add_activity(
             ACTIVITY_UPDATE,
             "disabled user {{user}}",
             self.datasource,
             user=doc.get("display_name", doc.get("username")),
         )
-        self.__clear_locked_items(str(doc["_id"]))
-        self.__handle_status_changed(updates={"is_enabled": False, "is_active": False}, user=doc)
+        await self.__clear_locked_items(str(doc["_id"]))
+        await self.__handle_status_changed_async(updates={"is_enabled": False, "is_active": False}, user=doc)
 
-    def on_fetched(self, document):
+    async def on_fetched_async(self, document):
         for doc in document["_items"]:
             self.__update_user_defaults(doc)
 
-    def on_fetched_item(self, doc):
+    async def on_fetched_item_async(self, doc):
         self.__update_user_defaults(doc)
 
     def __update_user_defaults(self, doc):
@@ -364,7 +380,7 @@ class UsersService(BaseService):
         doc.setdefault("display_name", get_display_name(doc))
         doc.setdefault("is_enabled", doc.get("is_active"))
         doc.setdefault(SIGN_OFF, set_sign_off(doc))
-        doc["dateline_source"] = app.config["ORGANIZATION_NAME_ABBREVIATION"]
+        doc["dateline_source"] = get_app_config("ORGANIZATION_NAME_ABBREVIATION")
 
     def user_is_waiting_activation(self, doc):
         return doc.get("needs_activation", False)
@@ -372,17 +388,17 @@ class UsersService(BaseService):
     def is_user_active(self, doc):
         return doc.get("is_active", False)
 
-    def get_role(self, user):
+    async def get_role(self, user):
         if user:
             role_id = user.get("role", None)
             if role_id:
-                return get_resource_service("roles").find_one(_id=role_id, req=None)
+                return await get_resource_service("roles").find_one_async(_id=role_id, req=None)
         return None
 
     def set_privileges(self, user, role):
         user["active_privileges"] = get_privileges(user, role)
 
-    def get(self, req, lookup):
+    async def get_async(self, req, lookup):
         try:
             is_author = req.args["is_author"]
         except (AttributeError, TypeError, KeyError):
@@ -391,7 +407,7 @@ class UsersService(BaseService):
             if is_author in ("0", "1"):
                 lookup["is_author"] = bool(int(is_author))
             else:
-                logger.warn("bad value of is_author argument ({value})".format(value=is_author))
+                logger.warning("bad value of is_author argument ({value})".format(value=is_author))
 
         """filtering out inactive users and disabled users"""
 
@@ -411,20 +427,23 @@ class UsersService(BaseService):
             else:
                 lookup = {"is_enabled": True}
 
-        return super().get(req, lookup)
+        return await super().get_async(req, lookup)
 
-    def get_users_by_user_type(self, user_type="user"):
-        return list(self.get(req=None, lookup={"user_type": user_type}))
-
-    def get_users_by_role(self, role_id):
-        return list(self.get(req=None, lookup={"role": role_id}))
-
+    # TODO-ASYNC[users]: Remove this once it's no longer needed
     def get_invisible_stages(self, user_id):
         return get_invisible_stages(user_id) if user_id else []
 
+    async def get_invisible_stages_async(self, user_id):
+        return await get_invisible_stages_async(user_id) if user_id else []
+
+    # TODO-ASYNC[users]: Remove this once it's no longer needed
     def get_invisible_stages_ids(self, user_id):
         return [str(stage["_id"]) for stage in self.get_invisible_stages(user_id)]
 
+    async def get_invisible_stages_ids_async(self, user_id):
+        return [str(stage["_id"]) for stage in await self.get_invisible_stages_async(user_id)]
+
+    # TODO-ASYNC[users]: Upgrade this to async when updating the ``EMailRFC822FeedParser`` module
     def get_user_by_email(self, email_address):
         """Finds a user by the given email_address.
 
@@ -442,30 +461,54 @@ class UsersService(BaseService):
 
         return user
 
+    # TODO-ASYNC[users]: Remove this once it's no longer needed
     def update_stage_visibility_for_users(self):
         if not self._updating_stage_visibility:
             return
         logger.info("Updating Stage Visibility Started")
-        users = list(get_resource_service("users").get(req=None, lookup=None))
+        users = list(self.get(req=None, lookup=None))
         for user in users:
             self.update_stage_visibility_for_user(user)
 
         logger.info("Updating Stage Visibility Completed")
 
+    async def update_stage_visibility_for_users_async(self):
+        if not self._updating_stage_visibility:
+            return
+        logger.info("Updating Stage Visibility Started")
+        users_cursor = await self.get_async(req=None, lookup=None)
+        async for user in users_cursor:
+            await self.update_stage_visibility_for_user_async(user)
+
+        logger.info("Updating Stage Visibility Completed")
+
+    # TODO-ASYNC[users]: Remove this once it's no longer needed
     def update_stage_visibility_for_user(self, user):
         if not self._updating_stage_visibility:
             return
         try:
-            logger.info("Updating Stage Visibility for user {}.".format(user.get(config.ID_FIELD)))
-            stages = self.get_invisible_stages_ids(user.get(config.ID_FIELD))
-            self.system_update(user.get(config.ID_FIELD), {"invisible_stages": stages}, user)
+            logger.info("Updating Stage Visibility for user {}.".format(user.get(ID_FIELD)))
+            stages = self.get_invisible_stages_ids(user.get(ID_FIELD))
+            self.system_update(user.get(ID_FIELD), {"invisible_stages": stages}, user)
             user["invisible_stages"] = stages
-            logger.info("Updated Stage Visibility for user {}.".format(user.get(config.ID_FIELD)))
+            logger.info("Updated Stage Visibility for user {}.".format(user.get(ID_FIELD)))
         except Exception:
-            logger.exception("Failed to update the stage visibility " "for user: {}".format(user.get(config.ID_FIELD)))
+            logger.exception("Failed to update the stage visibility " "for user: {}".format(user.get(ID_FIELD)))
+
+    async def update_stage_visibility_for_user_async(self, user):
+        if not self._updating_stage_visibility:
+            return
+        try:
+            logger.info("Updating Stage Visibility for user {}.".format(user.get(ID_FIELD)))
+            stages = await self.get_invisible_stages_ids_async(user.get(ID_FIELD))
+            self.system_update(user.get(ID_FIELD), {"invisible_stages": stages}, user)
+            user["invisible_stages"] = stages
+            logger.info("Updated Stage Visibility for user {}.".format(user.get(ID_FIELD)))
+        except Exception:
+            logger.exception("Failed to update the stage visibility " "for user: {}".format(user.get(ID_FIELD)))
 
     def stop_updating_stage_visibility(self):
-        if not app.config.get("SUPERDESK_TESTING"):
+        if not get_app_config("SUPERDESK_TESTING"):
             raise RuntimeError("Only allowed during testing")
         self._updating_stage_visibility = False
 
@@ -478,28 +521,29 @@ class DBUsersService(UsersService):
     Service class for UsersResource and should be used when AD is inactive.
     """
 
-    def on_create(self, docs):
-        super().on_create(docs)
+    async def on_create_async(self, docs):
+        await super().on_create_async(docs)
         for doc in docs:
             if doc.get("password", None) and not is_hashed(doc.get("password")):
-                doc["password"] = get_hash(doc.get("password"), app.config.get("BCRYPT_GENSALT_WORK_FACTOR", 12))
+                doc["password"] = get_hash(doc.get("password"), get_app_config("BCRYPT_GENSALT_WORK_FACTOR", 12))
 
-    def on_created(self, docs):
+    async def on_created_async(self, docs):
         """Send email to user with reset password token."""
-        super().on_created(docs)
-        resetService = get_resource_service("reset_user_password")
-        activate_ttl = app.config["ACTIVATE_ACCOUNT_TOKEN_TIME_TO_LIVE"]
+        await super().on_created_async(docs)
+        reset_service = get_resource_service("reset_user_password")
+        activate_ttl = get_app_config("ACTIVATE_ACCOUNT_TOKEN_TIME_TO_LIVE")
         for doc in docs:
             if self.user_is_waiting_activation(doc) and doc["user_type"] != "external":
                 tokenDoc = {"user": doc["_id"], "email": doc["email"]}
-                id = resetService.store_reset_password_token(tokenDoc, doc["email"], activate_ttl, doc["_id"])
+                id = await reset_service.store_reset_password_token(tokenDoc, doc["email"], activate_ttl, doc["_id"])
                 if not id:
                     raise SuperdeskApiError.internalError("Failed to send account activation email.")
                 tokenDoc.update({"username": doc["username"]})
-                send_activate_account_email(tokenDoc, activate_ttl)
 
-    def on_update(self, updates, user):
-        super().on_update(updates, user)
+                await send_activate_account_email(tokenDoc, activate_ttl)
+
+    async def on_update_async(self, updates, user):
+        await super().on_update_async(updates, user)
         if updates.get("first_name") or updates.get("last_name"):
             updated_user = {
                 "first_name": user.get("first_name", ""),
@@ -512,12 +556,12 @@ class DBUsersService(UsersService):
                 updated_user["last_name"] = updates.get("last_name")
             updates["display_name"] = get_display_name(updated_user)
 
-    def update_password(self, user_id, password):
+    async def update_password(self, user_id, password):
         """Update the user password.
 
         Returns true if successful.
         """
-        user = self.find_one(req=None, _id=user_id)
+        user = await self.find_one_async(req=None, _id=user_id)
 
         if not user:
             raise SuperdeskApiError.unauthorizedError("User not found")
@@ -526,34 +570,34 @@ class DBUsersService(UsersService):
             raise UserInactiveError()
 
         updates = {
-            "password": get_hash(password, app.config.get("BCRYPT_GENSALT_WORK_FACTOR", 12)),
+            "password": get_hash(password, get_app_config("BCRYPT_GENSALT_WORK_FACTOR", 12)),
             "password_changed_on": utcnow(),
-            app.config["LAST_UPDATED"]: utcnow(),
+            LAST_UPDATED: utcnow(),
         }
 
         if self.user_is_waiting_activation(user):
             updates["needs_activation"] = False
 
-        self.patch(user_id, updates=updates)
+        await self.patch_async(user_id, updates=updates)
 
-    def on_deleted(self, doc):
+    async def on_deleted_async(self, doc):
         """
         Overriding clean up reset password tokens:
         """
 
-        super().on_deleted(doc)
-        get_resource_service("reset_user_password").remove_all_tokens_for_email(doc.get("email"))
+        await super().on_deleted_async(doc)
+        await get_resource_service("reset_user_password").remove_all_tokens_for_email(doc.get("email"))
 
-    def _process_external_data(self, _data, update=False):
+    async def _process_external_data_async(self, _data, update=False):
         data = _data.copy()
         if data.get("role"):
             role_name = data.pop("role")
-            role = get_resource_service("roles").find_one(req=None, name=ignorecase_query(role_name))
+            role = await get_resource_service("roles").find_one_async(req=None, name=ignorecase_query(role_name))
             if role:
                 data["role"] = role["_id"]
-        if not update and (data.get("desk") or app.config.get("USER_EXTERNAL_DESK")):
-            desk_name = data.pop("desk", None) or app.config.get("USER_EXTERNAL_DESK")
-            desk = get_resource_service("desks").find_one(req=None, name=ignorecase_query(desk_name))
+        if not update and (data.get("desk") or get_app_config("USER_EXTERNAL_DESK")):
+            desk_name = data.pop("desk", None) or get_app_config("USER_EXTERNAL_DESK")
+            desk = await DesksResourceModel.get_service().find_one_raw(name=ignorecase_query(desk_name))
             if desk:
                 data["desk"] = desk["_id"]
         data["needs_activation"] = False
@@ -562,7 +606,7 @@ class DBUsersService(UsersService):
             data.pop("email", None)
             data.pop("username", None)
         elif data.get("username"):
-            if app.config.get("USER_EXTERNAL_USERNAME_STRIP_DOMAIN"):
+            if get_app_config("USER_EXTERNAL_USERNAME_STRIP_DOMAIN"):
                 data["username"] = data["username"].split("@")[0]
             data["username"] = data["username"].replace("@", ".")  # @ breaks mentioning
         validator = self._validator()
@@ -570,16 +614,16 @@ class DBUsersService(UsersService):
             raise ValidationError(validator.errors)
         return validator.normalized(data) if not update else data
 
-    def create_external_user(self, data):
-        docs = [self._process_external_data(data)]
-        self.on_create(docs)
-        self.create(docs)
+    async def create_external_user_async(self, data):
+        docs = [await self._process_external_data_async(data)]
+        await self.on_create_async(docs)
+        await self.create_async(docs)
         for user in docs:
             if user.get("desk"):
-                get_resource_service("desks").add_member(user["desk"], user["_id"])
+                await add_member_to_desk(user["desk"], user["_id"])
         return docs[0]
 
-    def update_external_user(self, _id, data):
-        orig = self.find_one(req=None, _id=ObjectId(_id))
-        updates = self._process_external_data(data, update=True)
-        self.system_update(ObjectId(_id), updates, orig)
+    async def update_external_user_async(self, _id, data):
+        orig = await self.find_one_async(req=None, _id=ObjectId(_id))
+        updates = await self._process_external_data_async(data, update=True)
+        await self.system_update_async(ObjectId(_id), updates, orig)

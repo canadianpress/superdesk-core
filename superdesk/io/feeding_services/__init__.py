@@ -8,13 +8,17 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
+from typing import AsyncGenerator
 import logging
 import warnings
+from inspect import isawaitable
 from abc import ABCMeta, abstractmethod
 from datetime import timedelta, datetime
 from pytz import utc
-from flask import current_app as app
-import superdesk
+
+from superdesk.core import get_app_config
+from superdesk.core.utils import list_to_async_generator
+from superdesk.resource_fields import ID_FIELD
 from superdesk import get_resource_service
 from superdesk.errors import SuperdeskApiError, SuperdeskIngestError
 from superdesk.io.registry import registered_feed_parsers, restricted_feeding_service_parsers
@@ -84,7 +88,7 @@ class FeedingService(metaclass=ABCMeta):
         self._provider = None
 
     @abstractmethod
-    def _update(self, provider, update):
+    async def _update(self, provider, update) -> AsyncGenerator[dict, None] | list[dict] | None:
         """
         Subclasses must override this method and get items from the provider as per the configuration.
 
@@ -97,7 +101,7 @@ class FeedingService(metaclass=ABCMeta):
         """
         raise NotImplementedError()
 
-    def _test_feed_parser(self, provider):
+    async def _test_feed_parser(self, provider):
         """
         Checks if the feed_parser value was in the restricted values list.
 
@@ -112,9 +116,9 @@ class FeedingService(metaclass=ABCMeta):
             and restricted_feeding_service_parsers.get(feeding_service)
             and not restricted_feeding_service_parsers.get(feeding_service).get(feed_parser)
         ):
-            raise SuperdeskIngestError.invalidFeedParserValue(provider=provider)
+            raise await SuperdeskIngestError.invalidFeedParserValue(provider=provider).send_notifications()
 
-    def _test(self, provider):
+    async def _test(self, provider):
         """
         Subclasses should override this method and do specific config test.
 
@@ -122,7 +126,7 @@ class FeedingService(metaclass=ABCMeta):
         """
         return
 
-    def config_test(self, provider=None):
+    async def config_test(self, provider=None):
         """Test provider configuration.
 
         :param provider: provider data
@@ -131,8 +135,8 @@ class FeedingService(metaclass=ABCMeta):
             return
         if self._is_closed(provider):
             return
-        self._test_feed_parser(provider)
-        return self._test(provider)
+        await self._test_feed_parser(provider)
+        return await self._test(provider)
 
     def _is_closed(self, provider):
         """Test if provider is closed.
@@ -150,7 +154,7 @@ class FeedingService(metaclass=ABCMeta):
     def _log_msg(self, msg, level="info"):
         getattr(logger, level)("Ingest:{} '{}': {}".format(self._provider["_id"], self._provider["name"], msg))
 
-    def update(self, provider, update):
+    async def update(self, provider, update) -> AsyncGenerator[dict, None] | None:
         """
         Clients consuming Ingest Services should invoke this to get items from the provider.
 
@@ -164,22 +168,33 @@ class FeedingService(metaclass=ABCMeta):
         """
         if self._is_closed(provider):
             raise SuperdeskApiError.internalError("Ingest Provider is closed")
-        else:
-            try:
-                self._provider = provider
-                self._log_msg("Start update execution.")
-                self._timer.start("update")
 
-                return self._update(provider, update) or []
-            except SuperdeskIngestError as error:
-                self.close_provider(provider, error)
-                raise error
-            finally:
-                self._log_msg("Stop update execution. Exec time: {:.4f} secs.".format(self._timer.stop("update")))
-                # just in case stop all timers
-                self._timer.stop_all()
+        try:
+            self._provider = provider
+            self._log_msg("Start update execution.")
+            self._timer.start("update")
 
-    def close_provider(self, provider, error, force=False):
+            response = self._update(provider, update)
+
+            # Feeds that return a list or None are awaitable, async generators are not.
+            # So check if the response is awaitable first and then await if needed.
+            items = await response if isawaitable(response) else response
+
+            if items is None:
+                return None
+            elif isinstance(items, list):
+                return list_to_async_generator(items)
+            else:
+                return items
+        except SuperdeskIngestError as error:
+            await self.close_provider(provider, error)
+            raise error
+        finally:
+            self._log_msg("Stop update execution. Exec time: {:.4f} secs.".format(self._timer.stop("update")))
+            # just in case stop all timers
+            self._timer.stop_all()
+
+    async def close_provider(self, provider, error, force=False):
         """Closes the provider and uses error as reason for closing.
 
         :param provider: Ingest Provider Details.
@@ -196,9 +211,7 @@ class FeedingService(metaclass=ABCMeta):
                 },
             }
 
-            get_resource_service("ingest_providers").system_update(
-                provider[superdesk.config.ID_FIELD], updates, provider
-            )
+            await get_resource_service("ingest_providers").system_update_async(provider[ID_FIELD], updates, provider)
 
     def add_timestamps(self, item):
         warnings.warn("deprecated, use localize_timestamps", DeprecationWarning)
@@ -218,7 +231,7 @@ class FeedingService(metaclass=ABCMeta):
         if not provider_last_updated:
             provider_last_updated = utcnow() - timedelta(days=7)
 
-        return provider_last_updated - timedelta(minutes=app.config[OLD_CONTENT_MINUTES]) < last_updated
+        return provider_last_updated - timedelta(minutes=get_app_config(OLD_CONTENT_MINUTES)) < last_updated
 
     def is_old_content(self, last_updated):
         """Test if file is old so it wouldn't probably work in is_latest_content next time.
@@ -227,7 +240,7 @@ class FeedingService(metaclass=ABCMeta):
 
         :param last_updated: file last updated datetime
         """
-        return last_updated < utcnow() - timedelta(minutes=app.config[OLD_CONTENT_MINUTES])
+        return last_updated < utcnow() - timedelta(minutes=get_app_config(OLD_CONTENT_MINUTES))
 
     def log_item_error(self, err, item, provider):
         """TODO: put item into provider error basket."""
@@ -249,7 +262,7 @@ class FeedingService(metaclass=ABCMeta):
         """
         return href
 
-    def get_feed_parser(self, provider, article=None):
+    async def get_feed_parser(self, provider, article=None):
         """
         Returns instance of configured feed parser for the given provider.
 
@@ -265,10 +278,10 @@ class FeedingService(metaclass=ABCMeta):
 
         parser = registered_feed_parsers.get(provider.get("feed_parser", ""))
         if not parser:
-            raise SuperdeskIngestError.parserNotFoundError(provider=provider)
+            raise await SuperdeskIngestError.parserNotFoundError(provider=provider).send_notifications()
 
         if article is not None and not parser.can_parse(article):
-            raise SuperdeskIngestError.parserNotFoundError(provider=provider)
+            raise await SuperdeskIngestError.parserNotFoundError(provider=provider).send_notifications()
 
         if article is not None:
             parser = parser.__class__()

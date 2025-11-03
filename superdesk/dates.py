@@ -1,9 +1,8 @@
 import pytz
-
-from flask import current_app as app
 from datetime import datetime
+from superdesk.core import get_config
 
 
 def get_local_today() -> datetime:
-    tz = pytz.timezone(app.config["DEFAULT_TIMEZONE"])
+    tz = pytz.timezone(get_config(str, "DEFAULT_TIMEZONE"))
     return datetime.now(tz)

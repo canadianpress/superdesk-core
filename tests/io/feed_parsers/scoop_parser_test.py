@@ -34,16 +34,16 @@ class ScoopTestCase(TestCase):
         }
     ]
 
-    def setUp(self):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
         dirname = os.path.dirname(os.path.realpath(__file__))
         fixture = os.path.normpath(os.path.join(dirname, "../fixtures", self.filename))
         provider = {"name": "Test"}
-        with self.app.app_context():
-            self.app.data.insert("vocabularies", self.vocab)
+        self.app.data.insert("vocabularies", self.vocab)
         with open(fixture, "rb") as f:
             parser = ScoopNewsMLTwoFeedParser()
             self.xml = etree.parse(f)
-            self.item = parser.parse(self.xml.getroot(), provider)
+            self.item = await parser.parse(self.xml.getroot(), provider)
 
     def test_content(self):
         self.assertEqual(

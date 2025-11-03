@@ -1,6 +1,7 @@
 mypy==1.15.0
 mypy-extensions==1.1.0
 toml
+types-aioboto3
 types-chardet
 types-click
 types-croniter
@@ -17,3 +18,9 @@ types-Werkzeug
 types-jwt
 typing-extensions
 boto3-stubs[s3,sqs]
+motor-types
+pydantic
+flask[async]
+quart>=0.19.6,<0.20.0
+aiohttp
+aioresponses==0.7.8

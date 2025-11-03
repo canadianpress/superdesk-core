@@ -8,15 +8,17 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
-from typing import Dict, Any
 import logging
 
-from eve.utils import config
-from flask_babel import lazy_gettext, LazyString
+from typing import Dict, Any
+from quart_babel import lazy_gettext, LazyString
 
+from superdesk.core import get_app_config
+from superdesk.resource_fields import ID_FIELD
 from superdesk import get_resource_service, Resource, Service
 from superdesk.metadata.item import CONTENT_STATE, ITEM_TYPE, CONTENT_TYPE, MEDIA_TYPES
 from superdesk.utils import ListCursor
+from superdesk.types import DesksResourceModel
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +30,10 @@ class RoutingRuleHandler:
     supported_configs: Dict[str, bool]
     default_values: Dict[str, Any]
 
-    def can_handle(self, rule, ingest_item, routing_scheme) -> bool:
+    async def can_handle(self, rule, ingest_item, routing_scheme) -> bool:
         raise NotImplementedError()
 
-    def apply_rule(self, rule, ingest_item, routing_scheme):
+    async def apply_rule(self, rule, ingest_item, routing_scheme):
         raise NotImplementedError()
 
 
@@ -73,6 +75,7 @@ class IngestRuleHandlersResource(Resource):
     }
 
 
+# Not upgrading to async, as there is no I/O to wait for
 class IngestRuleHandlersService(Service):
     def get(self, req, lookup):
         """Return list of available ingest rule handlers"""
@@ -95,6 +98,8 @@ class IngestRuleHandlersService(Service):
 
 
 class DeskFetchPublishRoutingRuleHandler(RoutingRuleHandler):
+    """Ingest routing rule for fetching an item to a desk and optionally publishing it."""
+
     ID = "desk_fetch_publish"
     NAME = lazy_gettext("Desk Fetch/Publish")
     supported_actions = {
@@ -119,29 +124,29 @@ class DeskFetchPublishRoutingRuleHandler(RoutingRuleHandler):
         },
     }
 
-    def can_handle(self, rule, ingest_item, routing_scheme):
+    async def can_handle(self, rule, ingest_item, routing_scheme):
         return ingest_item.get(ITEM_TYPE) in (
             MEDIA_TYPES + (CONTENT_TYPE.TEXT, CONTENT_TYPE.PREFORMATTED, CONTENT_TYPE.COMPOSITE)
         )
 
-    def apply_rule(self, rule, ingest_item, routing_scheme):
+    async def apply_rule(self, rule, ingest_item, routing_scheme):
         if rule.get("actions", {}).get("preserve_desk", False) and ingest_item.get("task", {}).get("desk"):
-            desk = get_resource_service("desks").find_one(req=None, _id=ingest_item["task"]["desk"])
+            desk = await DesksResourceModel.get_service().find_by_id_raw(ingest_item["task"]["desk"])
             if ingest_item.get("task", {}).get("stage"):
                 stage_id = ingest_item["task"]["stage"]
             else:
                 stage_id = desk["incoming_stage"]
-            self.__fetch(ingest_item, [{"desk": desk[config.ID_FIELD], "stage": stage_id}], rule)
+            await self.__fetch(ingest_item, [{"desk": desk[ID_FIELD], "stage": stage_id}], rule)
             fetch_actions = [
                 f for f in rule.get("actions", {}).get("fetch", []) if f.get("desk") != ingest_item["task"]["desk"]
             ]
         else:
             fetch_actions = rule.get("actions", {}).get("fetch", [])
 
-        self.__fetch(ingest_item, fetch_actions, rule)
-        self.__publish(ingest_item, rule.get("actions", {}).get("publish", []), rule)
+        await self.__fetch(ingest_item, fetch_actions, rule)
+        await self.__publish(ingest_item, rule.get("actions", {}).get("publish", []), rule)
 
-    def __fetch(self, ingest_item, destinations, rule):
+    async def __fetch(self, ingest_item, destinations, rule):
         """Fetch to item to the destinations
 
         :param item: item to be fetched
@@ -152,20 +157,22 @@ class DeskFetchPublishRoutingRuleHandler(RoutingRuleHandler):
             try:
                 logger.info("Fetching item %s to desk %s" % (ingest_item.get("guid"), destination))
                 target = self.__get_target(destination)
-                item_id = get_resource_service("fetch").fetch(
-                    [
-                        {
-                            config.ID_FIELD: ingest_item[config.ID_FIELD],
-                            "desk": str(destination.get("desk")),
-                            "stage": str(destination.get("stage")),
-                            "state": CONTENT_STATE.ROUTED,
-                            "macro": destination.get("macro", None),
-                            "target": target,
+                item_id = (
+                    await get_resource_service("fetch").fetch(
+                        [
+                            {
+                                ID_FIELD: ingest_item[ID_FIELD],
+                                "desk": str(destination.get("desk")),
+                                "stage": str(destination.get("stage")),
+                                "state": CONTENT_STATE.ROUTED,
+                                "macro": destination.get("macro", None),
+                                "target": target,
+                            },
+                        ],
+                        macro_kwargs={
+                            "rule": rule,
                         },
-                    ],
-                    macro_kwargs={
-                        "rule": rule,
-                    },
+                    )
                 )[0]
                 archive_items.append(item_id)
                 logger.info("Fetched item %s to desk %s" % (ingest_item.get("guid"), destination))
@@ -174,23 +181,23 @@ class DeskFetchPublishRoutingRuleHandler(RoutingRuleHandler):
 
         return archive_items
 
-    def __publish(self, ingest_item, destinations, rule):
+    async def __publish(self, ingest_item, destinations, rule):
         """Fetches the item to the desk and then publishes the item.
 
         :param item: item to be published
         :param destinations: list of desk and stage
         """
         guid = ingest_item.get("guid")
-        items_to_publish = self.__fetch(ingest_item, destinations, rule)
+        items_to_publish = await self.__fetch(ingest_item, destinations, rule)
         for item in items_to_publish:
             try:
-                archive_item = get_resource_service("archive").find_one(req=None, _id=item)
+                archive_item = await get_resource_service("archive").find_one_async(req=None, _id=item)
                 if archive_item.get("auto_publish") is False:
                     logger.info("Stop auto publishing of item %s", guid)
                     continue
                 logger.info("Publishing item %s", guid)
-                self._set_default_values(archive_item)
-                get_resource_service("archive_publish").patch(item, {"auto_publish": True})
+                await self._set_default_values(archive_item)
+                await get_resource_service("archive_publish").patch_async(item, {"auto_publish": True})
                 logger.info("Published item %s", guid)
             except Exception:
                 logger.exception("Failed to publish item %s.", guid)
@@ -210,11 +217,11 @@ class DeskFetchPublishRoutingRuleHandler(RoutingRuleHandler):
 
         return target
 
-    def _set_default_values(self, archive_item):
+    async def _set_default_values(self, archive_item):
         """Assigns the default values to the item that about to be auto published"""
-        default_categories = self._get_categories(config.DEFAULT_CATEGORY_QCODES_FOR_AUTO_PUBLISHED_ARTICLES)
+        default_categories = self._get_categories(get_app_config("DEFAULT_CATEGORY_QCODES_FOR_AUTO_PUBLISHED_ARTICLES"))
         default_values = self._assign_default_values(archive_item, default_categories)
-        get_resource_service("archive").patch(archive_item["_id"], default_values)
+        await get_resource_service("archive").patch_async(archive_item["_id"], default_values)
 
     def _assign_default_values(self, archive_item, default_categories):
         """Assigns the default values to the item that about to be auto published"""
@@ -239,6 +246,7 @@ class DeskFetchPublishRoutingRuleHandler(RoutingRuleHandler):
 
         qcode_list = qcodes.split(",")
         selected_categories = None
+        # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
         categories = get_resource_service("vocabularies").find_one(req=None, _id="categories")
 
         if categories and len(qcode_list) > 0:

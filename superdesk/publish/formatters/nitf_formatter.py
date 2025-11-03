@@ -8,15 +8,15 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
-import superdesk
 from lxml import etree as etree
 from lxml.etree import SubElement
-from flask import current_app as app
+from superdesk.core import get_app_config
 from superdesk.publish.formatters import Formatter
 from superdesk.errors import FormatterError
 from superdesk.metadata.item import ITEM_TYPE, CONTENT_TYPE, EMBARGO, FORMAT, FORMATS
 from apps.archive.common import get_utc_schedule
 from superdesk.text_utils import get_text
+from superdesk.publish_async.utils import generate_sequence_number
 
 
 class EraseElement(Exception):
@@ -28,6 +28,9 @@ class NITFFormatter(Formatter):
 
     Format items to `NITF <https://iptc.org/standards/nitf/>`_ version *3.6*.
     """
+
+    # We can't use cache due to use of subscriber for formatting.
+    use_cache = False
 
     XML_ROOT = '<?xml version="1.0"?>'
     ENCODING = "UTF-8"
@@ -135,9 +138,11 @@ class NITFFormatter(Formatter):
             "style": {"nitf": EraseElement},  # <style> may be there in case of bad paste
         }
 
-    def format(self, article, subscriber, codes=None):
+    async def format(
+        self, article: dict, subscriber: dict | None, codes: list | None = None
+    ) -> list[tuple[int, str] | dict]:
         try:
-            pub_seq_num = superdesk.get_resource_service("subscribers").generate_sequence_number(subscriber)
+            pub_seq_num = await generate_sequence_number(subscriber)
 
             nitf = self.get_nitf(article, subscriber, pub_seq_num)
             return [
@@ -148,10 +153,10 @@ class NITFFormatter(Formatter):
                 )
             ]
         except Exception as ex:
-            raise FormatterError.nitfFormatterError(ex, subscriber)
+            raise await FormatterError.nitfFormatterError(ex, subscriber).send_notifications()
 
     def get_nitf(self, article, destination, pub_seq_num):
-        if app.config.get("NITF_INCLUDE_SCHEMA", False):
+        if get_app_config("NITF_INCLUDE_SCHEMA", False):
             self._message_attrib.update(self._debug_message_extra)
         nitf = etree.Element("nitf", attrib=self._message_attrib)
         head = SubElement(nitf, "head")

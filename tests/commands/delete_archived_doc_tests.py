@@ -17,7 +17,8 @@ from superdesk.commands.delete_archived_document import DeleteArchivedDocumentCo
 
 
 class DeleteDocTestCase(TestCase):
-    def setUp(self):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
         self.guid = "urn:newsml:localhost:2016-09-12T12:11:40.160498:7237e59f-c42d-4865-aee5-e364aeb2966a"
 
         self.archived_only_data = [
@@ -105,59 +106,51 @@ class DeleteDocTestCase(TestCase):
             },
         ]
 
-        self.archivedService = get_resource_service("archived")
+        self.archived_service = get_resource_service("archived")
+        await self.archived_service.post_async(self.archived_only_data)
 
-    def test_no_id_provided_exception(self):
-        self.archivedService.post(self.archived_only_data)
-
+    async def test_no_id_provided_exception(self):
         f = io.StringIO()
         with redirect_stdout(f):
-            DeleteArchivedDocumentCommand().run([])
+            await DeleteArchivedDocumentCommand().run([])
         s = f.getvalue()
         self.assertEqual(s, "Please provide at least one id!\n")
 
-    def test_wrong_id_provided_exception(self):
-        self.archivedService.post(self.archived_only_data)
-
+    async def test_wrong_id_provided_exception(self):
         f = io.StringIO()
         with redirect_stdout(f):
-            DeleteArchivedDocumentCommand().run(["5880000000000"])
+            await DeleteArchivedDocumentCommand().run(["5880000000000"])
         s = f.getvalue()
         self.assertIn("No archived story found with given ids(s)!\n", s)
 
-    def test_delete_non_text_document_succeeds(self):
-        self.archivedService.post(self.archived_only_data)
+    async def test_delete_non_text_document_succeeds(self):
+        await DeleteArchivedDocumentCommand().run(["213456"])
+        item_count = await self.archived_service.count_async({"_id": "213456"})
+        self.assertEqual(0, item_count)
 
-        DeleteArchivedDocumentCommand().run(["213456"])
-        cursor = self.archivedService.get(req=None, lookup={"_id": "213456"})
-        self.assertEqual(0, len(cursor.docs))
+    async def test_delete_document_succeeds(self):
+        await DeleteArchivedDocumentCommand().run(["588c1b901d41c805dce70df0"])
 
-    def test_delete_document_succeeds(self):
-        self.archivedService.post(self.archived_only_data)
-        DeleteArchivedDocumentCommand().run(["588c1b901d41c805dce70df0"])
+        item_count = await self.archived_service.count_async({"_id": "588c1b901d41c805dce70df0"})
+        self.assertEqual(0, item_count)
+        item_count = await self.archived_service.count_async({"_id": "213456"})
+        self.assertEqual(0, item_count)
 
-        cursor = self.archivedService.get(req=None, lookup={"_id": "588c1b901d41c805dce70df0"})
-        self.assertEqual(0, len(cursor.docs))
-        cursor = self.archivedService.get(req=None, lookup={"_id": "213456"})
-        self.assertEqual(0, len(cursor.docs))
+    async def test_delete_multiple_documents_succeeds(self):
+        await DeleteArchivedDocumentCommand().run(["588c1b901d41c805dce70df0", "57d224de069b7f038e9d2a53"])
 
-    def test_delete_multiple_documents_succeeds(self):
-        self.archivedService.post(self.archived_only_data)
-        DeleteArchivedDocumentCommand().run(["588c1b901d41c805dce70df0", "57d224de069b7f038e9d2a53"])
+        item_count = await self.archived_service.count_async({"_id": "588c1b901d41c805dce70df0"})
+        self.assertEqual(0, item_count)
+        item_count = await self.archived_service.count_async({"_id": "57d224de069b7f038e9d2a53"})
+        self.assertEqual(0, item_count)
 
-        cursor = self.archivedService.get(req=None, lookup={"_id": "588c1b901d41c805dce70df0"})
-        self.assertEqual(0, len(cursor.docs))
-        cursor = self.archivedService.get(req=None, lookup={"_id": "57d224de069b7f038e9d2a53"})
-        self.assertEqual(0, len(cursor.docs))
-
-    def test_deleting_one_take_deletes_package_but_keeps_other_takes_succeeds(self):
+    async def test_deleting_one_take_deletes_package_but_keeps_other_takes_succeeds(self):
         # it will delete other takes in that package
-        self.archivedService.post(self.archived_only_data)
-        DeleteArchivedDocumentCommand().run(["588c1b901d41c805dce70df0"])
+        await DeleteArchivedDocumentCommand().run(["588c1b901d41c805dce70df0"])
 
-        cursor = self.archivedService.get(req=None, lookup={"_id": "588c1b901d41c805dce70df0"})
-        self.assertEqual(0, len(cursor.docs))
-        cursor = self.archivedService.get(req=None, lookup={"_id": "213456"})
-        self.assertEqual(0, len(cursor.docs))
-        cursor = self.archivedService.get(req=None, lookup={"_id": "57d224de069b7f038e9d2a53"})
-        self.assertEqual(1, len(cursor.docs))
+        item_count = await self.archived_service.count_async({"_id": "588c1b901d41c805dce70df0"})
+        self.assertEqual(0, item_count)
+        item_count = await self.archived_service.count_async({"_id": "213456"})
+        self.assertEqual(0, item_count)
+        item_count = await self.archived_service.count_async({"_id": "57d224de069b7f038e9d2a53"})
+        self.assertEqual(1, item_count)

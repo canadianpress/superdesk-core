@@ -15,11 +15,11 @@ import logging
 import re
 from email.header import decode_header
 
-import eve
-from flask import current_app as app, json
 from pytz import timezone
 
 import superdesk
+from superdesk.resource_fields import ID_FIELD
+from superdesk.core import json, get_current_app, get_app_config
 from superdesk import get_resource_service
 from superdesk.errors import IngestEmailError
 from superdesk.io.registry import register_feed_parser
@@ -52,9 +52,6 @@ class EMailRFC822FeedParser(EmailFeedParser):
 
     label = "EMail RFC822 Parser"
 
-    def __init__(self):
-        self.parser_app = app
-
     def can_parse(self, email_message):
         for response_part in email_message:
             if isinstance(response_part, tuple):
@@ -63,11 +60,11 @@ class EMailRFC822FeedParser(EmailFeedParser):
 
         return False
 
-    def parse(self, data, provider=None):
+    async def parse(self, data, provider=None):
         config = provider.get("config", {})
         # If the channel is configured to process structured email generated from a google form
         if config.get("formatted", False):
-            return self._parse_formatted_email(data, provider)
+            return await self._parse_formatted_email(data, provider)
         try:
             new_items = []
             # create an item for the body text of the email
@@ -83,6 +80,7 @@ class EMailRFC822FeedParser(EmailFeedParser):
 
             html_body = None
             text_body = None
+            app = get_current_app()
 
             for response_part in data:
                 if isinstance(response_part, tuple):
@@ -93,8 +91,9 @@ class EMailRFC822FeedParser(EmailFeedParser):
                     try:
                         if email_regex.findall(field_from):
                             email_address = email_regex.findall(field_from)[0]
+                            # TODO-ASYNC[users]: Upgrade this to async when updating this module
                             user = get_resource_service("users").get_user_by_email(email_address)
-                            item["original_creator"] = user[eve.utils.config.ID_FIELD]
+                            item["original_creator"] = user[ID_FIELD]
                     except UserNotRegisteredException:
                         pass
                     item["guid"] = msg["Message-ID"]
@@ -157,7 +156,7 @@ class EMailRFC822FeedParser(EmailFeedParser):
                             if content_type == "image/gif" or content_type == "image/png":
                                 continue
                             content.seek(0)
-                            image_id = self.parser_app.media.put(
+                            image_id = app.media.put(
                                 content, filename=fileName, content_type=content_type, metadata=metadata
                             )
 
@@ -242,7 +241,7 @@ class EMailRFC822FeedParser(EmailFeedParser):
             new_items.append(item)
             return new_items
         except Exception as ex:
-            raise IngestEmailError.emailParseError(ex, provider)
+            raise await IngestEmailError.emailParseError(ex, provider).send_notifications()
 
     def parse_header(self, field):
         try:
@@ -277,6 +276,7 @@ class EMailRFC822FeedParser(EmailFeedParser):
         :param mail_item:
         :return: An item populated with category codes
         """
+        # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
         anpa_categories = superdesk.get_resource_service("vocabularies").find_one(req=None, _id="categories")
         if anpa_categories:
             for mail_category in mail_item.get("Category").split(","):
@@ -299,7 +299,7 @@ class EMailRFC822FeedParser(EmailFeedParser):
                             )
                         break
 
-    def _parse_formatted_email(self, data, provider):
+    async def _parse_formatted_email(self, data, provider):
         """Construct an item from an email that was constructed as a notification from a google form submission.
 
         The google form submits to a google sheet, this sheet creates the email as a notification
@@ -312,6 +312,7 @@ class EMailRFC822FeedParser(EmailFeedParser):
             item = dict()
             item[ITEM_TYPE] = CONTENT_TYPE.TEXT
             item["versioncreated"] = utcnow()
+            app = get_current_app()
             for response_part in data:
                 if isinstance(response_part, tuple):
                     msg = email.message_from_bytes(response_part[1])
@@ -346,7 +347,7 @@ class EMailRFC822FeedParser(EmailFeedParser):
                             item["slugline"] = mail_item.get("Slugline", "")
                             item["body_html"] = "<p>" + mail_item.get("Body", "").replace("\n", "</p><p>") + "</p>"
 
-                            default_source = app.config.get("DEFAULT_SOURCE_VALUE_FOR_MANUAL_ARTICLES")
+                            default_source = get_app_config("DEFAULT_SOURCE_VALUE_FOR_MANUAL_ARTICLES")
                             city = mail_item.get("Dateline", "")
                             cities = app.locators.find_cities()
                             located = [c for c in cities if c["city"].lower() == city.lower()]
@@ -365,6 +366,7 @@ class EMailRFC822FeedParser(EmailFeedParser):
                                 if mail_item.get("Priority", "3").isdigit():
                                     item["priority"] = int(mail_item.get("Priority", "3"))
                                 else:
+                                    # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
                                     priority_map = superdesk.get_resource_service("vocabularies").find_one(
                                         req=None, _id="priority"
                                     )
@@ -387,6 +389,7 @@ class EMailRFC822FeedParser(EmailFeedParser):
                                     re.IGNORECASE,
                                 )
                             }
+                            # TODO-ASYNC[users]: Upgrade this to async when updating this module
                             user = superdesk.get_resource_service("users").find_one(req=None, **query)
                             if not user:
                                 logger.error(
@@ -402,11 +405,13 @@ class EMailRFC822FeedParser(EmailFeedParser):
 
                             # attempt to match the given desk name against the defined desks
                             query = {"name": re.compile("^{}$".format(mail_item.get("Desk", "")), re.IGNORECASE)}
+                            # TODO-ASYNC[desks]: Use DesksResourceModel async service where when upgrading this module
                             desk = superdesk.get_resource_service("desks").find_one(req=None, **query)
                             if desk:
                                 item["task"] = {"desk": desk.get("_id"), "stage": desk.get("incoming_stage")}
 
                             if "Place" in mail_item:
+                                # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
                                 locator_map = superdesk.get_resource_service("vocabularies").find_one(
                                     req=None, _id="locators"
                                 )
@@ -425,7 +430,7 @@ class EMailRFC822FeedParser(EmailFeedParser):
 
             return [item]
         except Exception as ex:
-            raise IngestEmailError.emailParseError(ex, provider)
+            raise await IngestEmailError.emailParseError(ex, provider).send_notifications()
 
 
 register_feed_parser(EMailRFC822FeedParser.NAME, EMailRFC822FeedParser())

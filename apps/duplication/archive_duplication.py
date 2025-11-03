@@ -9,9 +9,12 @@
 # at https://www.sourcefabric.org/superdesk/license
 import json
 
-from eve.utils import config, ParsedRequest
-from flask import request, current_app as app
+from eve.utils import ParsedRequest
 
+from superdesk.core import get_app_config
+from superdesk.eve_async.service import AsyncBaseService
+from superdesk.resource_fields import ID_FIELD
+from superdesk.flask import request
 import superdesk
 from apps.archive.archive import SOURCE as ARCHIVE, remove_is_queued
 from apps.auth import get_user, get_user_id
@@ -22,10 +25,9 @@ from superdesk.errors import SuperdeskApiError, InvalidStateTransitionError
 from superdesk.metadata.item import CONTENT_STATE, ITEM_STATE
 from superdesk.metadata.utils import item_url
 from superdesk.resource import Resource
-from superdesk.services import BaseService
 from superdesk.workflow import is_workflow_state_transition_valid
 from superdesk.utc import utcnow
-from flask_babel import _
+from quart_babel import gettext as _
 
 
 class DuplicateResource(Resource):
@@ -47,13 +49,13 @@ class DuplicateResource(Resource):
     privileges = {"POST": "duplicate"}
 
 
-class DuplicateService(BaseService):
-    def on_create(self, docs):
+class DuplicateService(AsyncBaseService):
+    async def on_create_async(self, docs):
         for doc in docs:
-            if not doc.get("desk") and not app.config["WORKFLOW_ALLOW_COPY_TO_PERSONAL"]:
+            if not doc.get("desk") and not get_app_config("WORKFLOW_ALLOW_COPY_TO_PERSONAL"):
                 raise SuperdeskApiError.forbiddenError(message=_("Duplicate to Personal space is not allowed."))
 
-    def create(self, docs, **kwargs):
+    async def create_async(self, docs, **kwargs):
         guid_of_item_to_be_duplicated = request.view_args["guid"]
 
         guid_of_duplicated_items = []
@@ -71,12 +73,13 @@ class DuplicateService(BaseService):
                     "size": 1,
                 }
                 req.args = {"source": json.dumps(query)}
-                archived_docs = archived_service.get(req=req, lookup=None)
-                if archived_docs.count() > 0:
-                    archived_doc = archived_docs[0]
-
+                archived_docs_cursor = await archived_service.get_async(req=req, lookup=None)
+                try:
+                    archived_doc = await archived_docs_cursor.next()
+                except StopAsyncIteration:
+                    archived_doc = {}
             else:
-                archived_doc = archive_service.find_one(req=None, _id=guid_of_item_to_be_duplicated)
+                archived_doc = await archive_service.find_one_async(req=None, _id=guid_of_item_to_be_duplicated)
 
             self._validate(archived_doc, doc, guid_of_item_to_be_duplicated)
 
@@ -86,7 +89,7 @@ class DuplicateService(BaseService):
 
             remove_is_queued(archived_doc)
 
-            send_to(
+            await send_to(
                 doc=archived_doc,
                 desk_id=doc.get("desk"),
                 stage_id=doc.get("stage"),
@@ -97,7 +100,7 @@ class DuplicateService(BaseService):
             if not doc.get("desk"):  # item copied to personal space
                 archived_doc["state"] = CONTENT_STATE.PROGRESS
 
-            new_guid = archive_service.duplicate_content(archived_doc)
+            new_guid = await archive_service.duplicate_content(archived_doc)
             guid_of_duplicated_items.append(new_guid)
 
         if kwargs.get("notify", True):
@@ -136,7 +139,7 @@ class DuplicateService(BaseService):
         lock_user = doc_in_archive.get("lock_user", None)
         force_unlock = doc_in_archive.get("force_unlock", False)
         user = get_user()
-        str_user_id = str(user.get(config.ID_FIELD)) if user else None
+        str_user_id = str(user.get(ID_FIELD)) if user else None
         if lock_user and str(lock_user) != str_user_id and not force_unlock:
             raise SuperdeskApiError.forbiddenError(_("The item was locked by another user"))
 

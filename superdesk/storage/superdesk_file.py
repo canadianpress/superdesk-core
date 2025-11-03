@@ -9,45 +9,49 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 from typing import Optional
-from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
-from werkzeug.wsgi import wrap_file
-from flask import request, current_app as app
+from werkzeug.datastructures import Range
 
+from superdesk.core import get_current_app
+from superdesk.core.types import SuperdeskFile, SuperdeskAsyncFile  # noqa
+from superdesk.flask import request
 from superdesk.default_settings import strtobool
 
 
-class SuperdeskFile(BytesIO):
-    _name: str
-    filename: str
-    content_type: str
-    length: int
-    upload_date: datetime
-    md5: str
+def get_file_request_range(request_range: Range | None) -> tuple[int, int | None]:
+    if request_range is None or not len(request_range.ranges):
+        return 0, None
 
-    @property
-    def name(self):
-        return self._name
+    return request_range.ranges[0]
 
 
-def generate_response_for_file(
-    file: SuperdeskFile,
+async def generate_response_for_file(
+    file: SuperdeskFile | SuperdeskAsyncFile,
     cache_for: int = 3600 * 24 * 30,  # 30d cache
     buffer_size: int = 1024 * 256,
     content_disposition: Optional[str] = None,
 ):
-    data = wrap_file(request.environ, file, buffer_size=buffer_size)
-    response = app.response_class(data, mimetype=file.content_type, direct_passthrough=True)
+    app = get_current_app()
+
+    if isinstance(file, SuperdeskAsyncFile):
+        file_body = file
+        file_body.buffer_size = buffer_size
+    else:
+        file_body = app.as_any().response_class.io_body_class(file, buffer_size=buffer_size)
+
+    response = app.response_class(file_body, mimetype=file.content_type)
     response.content_length = file.length
     response.last_modified = file.upload_date
-    response.set_etag(file.md5)
+    if file.md5:
+        response.set_etag(file.md5)
     response.cache_control.max_age = cache_for
     response.cache_control.s_max_age = cache_for
     response.cache_control.public = True
+    response.expires = datetime.now(timezone.utc) + timedelta(seconds=cache_for)
 
     # Add ``accept_ranges`` & ``complete_length`` so video seeking is supported
-    response.make_conditional(request, accept_ranges=True, complete_length=file.length)
+    await response.make_conditional(request, accept_ranges=True, complete_length=file.length)
 
     if content_disposition:
         response.headers["Content-Disposition"] = content_disposition

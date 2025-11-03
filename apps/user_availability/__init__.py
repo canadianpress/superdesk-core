@@ -1,6 +1,6 @@
 import superdesk
 
-from flask_babel import lazy_gettext
+from quart_babel import lazy_gettext
 from celery.schedules import crontab
 from superdesk.celery_app import celery
 
@@ -41,8 +41,8 @@ def init_app(app):
     )
 
 
-@celery.task
-def generate_user_availability():
+@celery.task()
+async def generate_user_availability():
     """
     Generate user availability for all users.
     """

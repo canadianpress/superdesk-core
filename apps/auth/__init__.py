@@ -8,19 +8,19 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
-import flask
 import logging
-from flask_babel import _
-from eve.utils import config
+from quart_babel import gettext as _
 
+from superdesk.resource_fields import ID_FIELD
+from superdesk.flask import g
 import superdesk
 from superdesk.errors import SuperdeskApiError
-from superdesk.services import BaseService
+from superdesk.eve_async import AsyncBaseService
 from superdesk.celery_app import celery
 from apps.auth.auth import SuperdeskTokenAuth
 from .auth import AuthUsersResource, AuthResource  # noqa
 from .sessions import SessionsResource, UserSessionClearResource
-from .session_purge import RemoveExpiredSessions
+from .session_purge import RemoveExpiredSessions, cli_session_gc  # noqa
 from .service import UserSessionClearService, AuthService
 
 logger = logging.getLogger(__name__)
@@ -30,11 +30,11 @@ def init_app(app) -> None:
     app.auth = SuperdeskTokenAuth()  # Overwrite the app default auth
 
     endpoint_name = "auth_users"
-    service = BaseService(endpoint_name, backend=superdesk.get_backend())
+    service = AsyncBaseService(endpoint_name, backend=superdesk.get_backend())
     AuthUsersResource(endpoint_name, app=app, service=service)
 
     endpoint_name = "sessions"
-    service = BaseService(endpoint_name, backend=superdesk.get_backend())
+    service = AsyncBaseService(endpoint_name, backend=superdesk.get_backend())
     SessionsResource(endpoint_name, app=app, service=service)
 
     endpoint_name = "clear_sessions"
@@ -46,10 +46,10 @@ def init_app(app) -> None:
     AuthResource(endpoint_name, app=app, service=service)
 
 
-@celery.task
-def session_purge():
+@celery.task()
+async def session_purge():
     try:
-        RemoveExpiredSessions().run()
+        await RemoveExpiredSessions().run()
     except Exception as ex:
         logger.error(ex)
 
@@ -59,8 +59,8 @@ def get_user(required=False):
 
     :param boolean required: if True and there is no user it will raise an error
     """
-    user = flask.g.get("user", {})
-    if config.ID_FIELD not in user and required:
+    user = g.get("user", {})
+    if ID_FIELD not in user and required:
         raise SuperdeskApiError.notFoundError(_("Invalid user."))
     return user
 
@@ -71,12 +71,12 @@ def get_user_id(required=False):
     :param boolean required: if True and there is no user it will raise an error
     """
     user = get_user(required)
-    return user.get(config.ID_FIELD)
+    return user.get(ID_FIELD)
 
 
 def get_auth():
     """Get authenticated session data."""
-    auth = flask.g.get("auth", {})
+    auth = g.get("auth", {})
     return auth
 
 
@@ -87,6 +87,3 @@ def is_current_user_admin(required=False):
     """
     user = get_user(required) or {}
     return user.get("user_type", "") == "administrator"
-
-
-superdesk.command("session:gc", RemoveExpiredSessions())

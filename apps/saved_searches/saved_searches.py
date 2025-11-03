@@ -17,13 +17,16 @@ from eve.methods.common import resolve_document_etag
 from eve_elastic.elastic import build_elastic_query
 from apps.archive.common import get_user
 from superdesk import Resource, get_resource_service
-from superdesk.services import BaseService
+from superdesk.core.types.common import ItemId
+from superdesk.eve_async.cursors import AsyncEveCursor, AsyncListCursor
+from superdesk.eve_async.service import AsyncBaseService
+from superdesk.utils import ListCursor
 from superdesk.errors import SuperdeskApiError
 from superdesk.notification import push_notification
 from superdesk.users.services import current_user_has_privilege
 from superdesk.metadata.item import get_schema
 from apps.auth import get_user_id
-from flask_babel import _
+from quart_babel import gettext as _
 
 logger = logging.getLogger(__name__)
 
@@ -121,37 +124,37 @@ class AllSavedSearchesResource(Resource):
     schema = SavedSearchesResource.schema
 
 
-class AllSavedSearchesService(BaseService):
-    def on_fetched_item(self, doc):
+class AllSavedSearchesService(AsyncBaseService):
+    async def on_fetched_item_async(self, doc: dict) -> None:
         enhance_savedsearch(doc)
 
-    def on_fetched(self, docs):
+    async def on_fetched_async(self, docs: dict) -> None:
         for doc in docs.get("_items", []):
             enhance_savedsearch(doc)
 
 
-class SavedSearchesService(BaseService):
-    def on_create(self, docs):
+class SavedSearchesService(AsyncBaseService):
+    async def on_create_async(self, docs: list[dict]) -> None:
         for doc in docs:
             doc["user"] = get_user_id(required=True)
             if "subscribers" in doc:
                 raise SuperdeskApiError.forbiddenError(_("User's subscriptions are not allowed on create"))
 
-            self.process(doc)
+            await self.process(doc)
         push_notification(UPDATE_NOTIFICATION)
 
-    def on_created(self, docs):
+    async def on_created_async(self, docs: list[dict]) -> None:
         for doc in docs:
             doc["filter"] = decode_filter(doc["filter"])
 
-    def process(self, doc):
+    async def process(self, doc):
         """
         Validates, constructs and runs the query in the document
         """
         repo, query = self.process_query(doc)
         if repo.find(",") >= 0:
             repo = repo.split(",").pop(0)
-        self.validate_and_run_elastic_query(query, repo)
+        await self.validate_and_run_elastic_query(query, repo)
         doc["filter"] = encode_filter(doc.get("filter"))
 
     def process_subscription(self, updates, original):
@@ -179,7 +182,7 @@ class SavedSearchesService(BaseService):
             if not current_user_has_privilege("saved_searches_subscriptions_admin"):
                 raise SuperdeskApiError.forbiddenError(_("Unauthorized to modify other users' subscriptions."))
 
-    def on_update(self, updates, original):
+    async def on_update_async(self, updates: dict, original: dict) -> None:
         """Runs on update.
 
         Checks if the request owner and the saved search owner are the same person
@@ -187,12 +190,12 @@ class SavedSearchesService(BaseService):
         """
         self._validate_user(original.get("user", ""), original.get("is_global", False))
         if "filter" in updates:
-            self.process(updates)
+            await self.process(updates)
         self.process_subscription(updates, original)
-        super().on_update(updates, original)
+        await super().on_update_async(updates, original)
         push_notification(UPDATE_NOTIFICATION)
 
-    def get(self, req, lookup):
+    async def get_async(self, req: ParsedRequest | None, lookup: dict | None) -> AsyncEveCursor:
         """
         Overriding to pass user as a search parameter
         """
@@ -205,11 +208,11 @@ class SavedSearchesService(BaseService):
         else:
             req.where = json.dumps({"$or": [{"is_global": True}, {"user": session_user}]})
 
-        return super().get(req, lookup=None)
+        return await super().get_async(req, lookup=None)
 
-    def update(self, id, updates, original):
+    async def update_async(self, id: ItemId, updates: dict, original: dict) -> dict:
         resolve_document_etag(updates, self.datasource)  # sync etag with any changes done while processing
-        res = super().update(id, updates, original)
+        res = await super().update_async(id, updates, original)
         try:
             res["filter"] = decode_filter(res["filter"])
         except KeyError:
@@ -247,7 +250,7 @@ class SavedSearchesService(BaseService):
             {k: v for k, v in doc["filter"]["query"].items() if k != "repo"}
         )
 
-    def validate_and_run_elastic_query(self, elastic_query, index):
+    async def validate_and_run_elastic_query(self, elastic_query, index):
         """
         Validates the elastic_query against ElasticSearch.
 
@@ -259,24 +262,24 @@ class SavedSearchesService(BaseService):
         parsed_request = self.init_request(elastic_query)
         parsed_request.args["repo"] = index
         try:
-            return get_resource_service("search_providers_proxy").get(req=parsed_request, lookup={})
+            return await get_resource_service("search_providers_proxy").get_async(req=parsed_request, lookup={})
         except Exception as e:
             logger.exception(e)
             raise SuperdeskApiError.badRequestError(
                 _("Fail to validate the filter against {index}.").format(index=index)
             )
 
-    def on_fetched_item(self, doc):
+    async def on_fetched_item_async(self, doc: dict) -> None:
         enhance_savedsearch(doc)
 
-    def on_fetched(self, docs):
+    async def on_fetched_async(self, docs: dict) -> None:
         for doc in docs.get("_items", []):
             enhance_savedsearch(doc)
 
-    def on_deleted(self, doc):
+    async def on_deleted_async(self, doc: dict) -> None:
         push_notification(UPDATE_NOTIFICATION)
 
-    def on_delete(self, doc):
+    async def on_delete_async(self, doc: dict) -> None:
         self._validate_user(str(doc["user"]), doc["is_global"])
 
     def _validate_user(self, doc_user_id, doc_is_global):
@@ -305,9 +308,12 @@ class SavedSearchItemsResource(Resource):
 
 
 class SavedSearchItemsService(SavedSearchesService):
-    def get(self, req, **lookup):
-        saved_search_id = lookup["lookup"]["saved_search_id"]
-        saved_search = get_resource_service("saved_searches").find_one(req=None, _id=saved_search_id)
+    async def get_async(self, req: ParsedRequest | None, lookup: dict | None) -> AsyncEveCursor:
+        if not lookup:
+            raise SuperdeskApiError.badRequestError(_("Saved Search Item Lookup not provided"))
+
+        saved_search_id = lookup["saved_search_id"]
+        saved_search = await get_resource_service("saved_searches").find_one_async(req=None, _id=saved_search_id)
 
         if not saved_search:
             raise SuperdeskApiError.notFoundError(_("Invalid Saved Search"))
@@ -315,4 +321,12 @@ class SavedSearchItemsService(SavedSearchesService):
         saved_search["filter"] = decode_filter(saved_search.get("filter"))
 
         repo, query = super().process_query(saved_search)
-        return super().validate_and_run_elastic_query(query, repo)
+        cursor = await super().validate_and_run_elastic_query(query, repo)
+        if isinstance(cursor, AsyncEveCursor):
+            return cursor
+        elif isinstance(cursor, list):
+            return AsyncListCursor(cursor)
+        elif isinstance(cursor, ListCursor):
+            return AsyncListCursor(cursor.docs)
+        else:
+            raise SuperdeskApiError.internalError(_("Invalid cursor type"))

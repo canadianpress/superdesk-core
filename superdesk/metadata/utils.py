@@ -9,15 +9,17 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 from typing import Union
-from datetime import datetime
-from uuid import uuid4
 from bson import ObjectId
 from urllib.parse import urlparse
-from flask import current_app as app
 from contextlib import contextmanager
 
+# Moved `generate_guid` from here to superdesk.core.utils
+# Keeping import here so other code still works
+from superdesk.core.resources.model import ResourceModel
+from superdesk.core.utils import generate_guid, GUID_TAG, GUID_NEWSML  # noqa
+from superdesk.core import get_app_config
 from superdesk.utils import SuperdeskBaseEnum
-from .item import GUID_TAG, GUID_NEWSML, GUID_FIELD, ITEM_TYPE, CONTENT_TYPE
+from .item import GUID_FIELD, ITEM_TYPE, CONTENT_TYPE
 
 
 item_url = r'regex("[\w,.:_-]+")'
@@ -98,42 +100,15 @@ def get_elastic_highlight_query(query_string):
 def _set_highlight_query(source):
     query_string = source.get("query", {}).get("filtered", {}).get("query", {}).get("query_string")
     if query_string:
-        query_string.setdefault("analyze_wildcard", app.config["ELASTIC_QUERY_STRING_ANALYZE_WILDCARD"])
-        query_string.setdefault("type", app.config["ELASTIC_QUERY_STRING_TYPE"])
+        query_string.setdefault("analyze_wildcard", get_app_config("ELASTIC_QUERY_STRING_ANALYZE_WILDCARD"))
+        query_string.setdefault("type", get_app_config("ELASTIC_QUERY_STRING_TYPE"))
         highlight_query = get_elastic_highlight_query(query_string)
         if highlight_query:
             source["highlight"] = highlight_query
 
 
-def generate_guid(**hints):
-    """Generate a GUID based on given hints
-
-    param: hints: hints used for generating the guid
-    """
-    newsml_guid_format = "urn:newsml:%(domain)s:%(timestamp)s:%(identifier)s"
-    tag_guid_format = "tag:%(domain)s:%(year)d:%(identifier)s"
-
-    if not hints.get("id"):
-        hints["id"] = str(uuid4())
-
-    if app.config.get("GENERATE_SHORT_GUID", False):
-        return hints["id"]
-
-    t = datetime.today()
-
-    if hints["type"].lower() == GUID_TAG:
-        return tag_guid_format % {"domain": app.config["URN_DOMAIN"], "year": t.year, "identifier": hints["id"]}
-    elif hints["type"].lower() == GUID_NEWSML:
-        return newsml_guid_format % {
-            "domain": app.config["URN_DOMAIN"],
-            "timestamp": t.isoformat(),
-            "identifier": hints["id"],
-        }
-    return None
-
-
 def generate_urn(resource_name: str, resource_id: Union[ObjectId, str]) -> str:
-    domain = app.config["URN_DOMAIN"]
+    domain = get_app_config("URN_DOMAIN")
     return f"urn:{domain}:{resource_name}:{resource_id}"
 
 
@@ -159,12 +134,23 @@ def generate_tag_from_url(url, prefix="tag"):
 
 def is_normal_package(doc):
     """
-    Returns True if the passed doc is a package. Otherwise, returns False.
+    Returns true if the passed doc is a package. otherwise, returns false.
 
-    :return: True if it's a Package, False otherwise.
+    :return: true if it's a package, false otherwise.
     """
 
     return doc[ITEM_TYPE] == CONTENT_TYPE.COMPOSITE
+
+
+def is_normal_package_async(doc: ResourceModel) -> bool:
+    """
+    Returns true if the passed doc is a package. otherwise, returns false.
+
+    This method is to be used with ResourceModel, in async context.
+
+    :return: true if it's a package, false otherwise.
+    """
+    return doc.type == CONTENT_TYPE.COMPOSITE
 
 
 class ProductTypes(SuperdeskBaseEnum):

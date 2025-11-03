@@ -10,21 +10,25 @@
 
 import os
 import json
-import flask
 import logging
 import superdesk
 import multiprocessing
 import werkzeug.exceptions
 
-from flask import current_app as app
 from eve.utils import date_to_str
 from eve.versioning import insert_versioning_documents
 from bson.objectid import ObjectId
+import click
+
+from superdesk.core import get_current_app, get_app_config
+from superdesk.commands import cli
+from superdesk.resource_fields import VERSION
+from superdesk.flask import g, abort
 from apps.archive.common import ITEM_OPERATION
 from superdesk import get_resource_service
 from superdesk.metadata.item import ITEM_STATE, CONTENT_STATE
 from superdesk.resource import Resource
-from superdesk.services import BaseService
+from superdesk.eve_async.service import AsyncBaseService
 from superdesk.tests import clean_dbs
 from superdesk.utc import utcnow
 from superdesk.timer import timer
@@ -32,6 +36,25 @@ from apps.search_providers import allowed_search_providers, register_search_prov
 
 
 logger = logging.getLogger(__name__)
+
+
+@cli.command("app:prepopulate")
+@click.option("--file", "-f", "prepopulate_file", default="app_prepopulate_data.json")
+@click.option("--dir", "-d", "directory", default=None)
+async def cli_app_prepopulate(prepopulate_file, directory):
+    """Prepopulate Superdesk using sample data.
+
+    Useful for demo/development environment, but don't run in production,
+    it's hard to get rid of such data later.
+
+    Example:
+    ::
+
+        $ python manage.py app:prepopulate
+
+    """
+
+    await AppPrepopulateCommand().run(prepopulate_file, directory)
 
 
 def apply_placeholders(placeholders, text):
@@ -42,14 +65,16 @@ def apply_placeholders(placeholders, text):
     return text
 
 
-def set_logged_user(username, password):
-    auth_token = get_resource_service("auth").find_one(username=username, req=None)
+async def set_logged_user(username, password):
+    auth_service = get_resource_service("auth")
+    auth_token = await auth_service.find_one_async(username=username, req=None)
     if not auth_token:
         user = {"username": username, "password": password}
-        get_resource_service("auth_db").post([user])
-        auth_token = get_resource_service("auth").find_one(username=username, req=None)
-    flask.g.user = get_resource_service("users").find_one(req=None, username=username)
-    flask.g.auth = auth_token
+        await get_resource_service("auth_db").post_async([user])
+        auth_token = await auth_service.find_one_async(username=username, req=None)
+
+    g.user = await get_resource_service("users").find_one_async(req=None, username=username)
+    g.auth = auth_token
 
 
 def get_default_user():
@@ -66,7 +91,7 @@ def get_default_user():
     return user
 
 
-def prepopulate_data(file_name, default_user=None, directory=None):
+async def prepopulate_data(file_name, default_user=None, directory=None):
     if default_user is None:
         default_user = get_default_user()
 
@@ -76,6 +101,8 @@ def prepopulate_data(file_name, default_user=None, directory=None):
     users = {default_user["username"]: default_user["password"]}
     default_username = default_user["username"]
     file = os.path.join(directory, file_name)
+    app = get_current_app()
+    current_username = None
     with open(file, "rt", encoding="utf8") as app_prepopulation:
         json_data = json.load(app_prepopulation)
         for item in json_data:
@@ -84,8 +111,13 @@ def prepopulate_data(file_name, default_user=None, directory=None):
                 service = get_resource_service(resource)
             except KeyError:
                 continue  # resource which is not configured - ignore
+
+            # If the username is different, then login as the new user
             username = item.get("username", None) or default_username
-            set_logged_user(username, users[username])
+            if current_username is None or current_username != username:
+                current_username = username
+                await set_logged_user(username, users[username])
+
             id_name = item.get("id_name", None)
             id_update = item.get("id_update", None)
             text = json.dumps(item.get("data", None))
@@ -97,12 +129,18 @@ def prepopulate_data(file_name, default_user=None, directory=None):
                 users.update({data["username"]: data["password"]})
             if id_update:
                 id_update = apply_placeholders(placeholders, id_update)
-                res = service.patch(ObjectId(id_update), data)
+                if hasattr(service, "patch_async"):
+                    res = await service.patch_async(ObjectId(id_update), data)
+                else:
+                    res = service.patch(ObjectId(id_update), data)
                 if not res:
                     raise Exception()
             else:
                 try:
-                    ids = service.post([data])
+                    if hasattr(service, "post_async"):
+                        ids = await service.post_async([data])
+                    else:
+                        ids = service.post([data])
                 except werkzeug.exceptions.Conflict:
                     # instance was already prepopulated
                     break
@@ -114,8 +152,8 @@ def prepopulate_data(file_name, default_user=None, directory=None):
                 if id_name:
                     placeholders[id_name] = str(ids[0])
 
-            if app.config["VERSION"] in data:
-                number_of_versions_to_insert = data[app.config["VERSION"]]
+            if VERSION in data:
+                number_of_versions_to_insert = data[VERSION]
                 doc_versions = []
 
                 if data[ITEM_STATE] not in [CONTENT_STATE.PUBLISHED, CONTENT_STATE.CORRECTED, CONTENT_STATE.KILLED]:
@@ -130,7 +168,7 @@ def prepopulate_data(file_name, default_user=None, directory=None):
                         published_version = data.copy()
                         published_version[ITEM_STATE] = CONTENT_STATE.PUBLISHED
                         published_version[ITEM_OPERATION] = "publish"
-                        published_version[app.config["VERSION"]] = number_of_versions_to_insert - 1
+                        published_version[VERSION] = number_of_versions_to_insert - 1
                         doc_versions.append(published_version)
 
                         number_of_versions_to_insert -= 2
@@ -143,7 +181,7 @@ def prepopulate_data(file_name, default_user=None, directory=None):
                         doc = data.copy()
                         doc[ITEM_STATE] = CONTENT_STATE.PROGRESS
                         doc.pop(ITEM_OPERATION, "")
-                        doc[app.config["VERSION"]] = number_of_versions_to_insert
+                        doc[VERSION] = number_of_versions_to_insert
                         doc_versions.append(doc)
 
                         number_of_versions_to_insert -= 1
@@ -165,60 +203,44 @@ class PrepopulateResource(Resource):
     public_methods = ["POST"]
 
 
-class PrepopulateService(BaseService):
-    def _create(self, docs):
+class PrepopulateService(AsyncBaseService):
+    async def _create_async(self, docs):
+        app = get_current_app()
         for doc in docs:
             if doc.get("remove_first"):
-                clean_dbs(app, force=True)
-
-            app.init_indexes()
-            app.data.init_elastic(app)
+                await clean_dbs(app, force=True, init_indexes=True)
 
             get_resource_service("users").stop_updating_stage_visibility()
 
-            user = get_resource_service("users").find_one(username=get_default_user()["username"], req=None)
+            users_service = get_resource_service("users")
+            user = await users_service.find_one_async(username=get_default_user()["username"], req=None)
             if not user:
-                get_resource_service("users").post([get_default_user()])
+                await users_service.post_async([get_default_user()])
 
-            prepopulate_data(doc.get("profile") + ".json", get_default_user())
+            await prepopulate_data(doc.get("profile") + ".json", get_default_user())
 
-            get_resource_service("users").start_updating_stage_visibility()
-            get_resource_service("users").update_stage_visibility_for_users()
+            users_service.start_updating_stage_visibility()
+            await users_service.update_stage_visibility_for_users_async()
 
-    def create(self, docs, **kwargs):
+    async def create_async(self, docs, **kwargs):
+        if not get_app_config("SUPERDESK_TESTING"):
+            # This endpoint should not be available when not in testing
+            return abort(404)
+
         with multiprocessing.Lock() as lock:
             with timer("prepopulate"):
-                self._create(docs)
-            if app.config.get("SUPERDESK_TESTING"):
+                await self._create_async(docs)
+            if get_app_config("SUPERDESK_TESTING"):
                 for provider in ["paimg", "aapmm"]:
                     if provider not in allowed_search_providers:
                         register_search_provider(provider, provider)
             return ["OK"]
 
 
-class AppPrepopulateCommand(superdesk.Command):
-    """Prepopulate Superdesk using sample data.
-
-    Useful for demo/development environment, but don't run in production,
-    it's hard to get rid of such data later.
-
-    Example:
-    ::
-
-        $ python manage.py app:prepopulate
-
-    """
-
-    option_list = [
-        superdesk.Option("--file", "-f", dest="prepopulate_file", default="app_prepopulate_data.json"),
-        superdesk.Option("--dir", "-d", dest="directory", default=None),
-    ]
-
-    def run(self, prepopulate_file, directory=None):
-        user = get_resource_service("users").find_one(username=get_default_user()["username"], req=None)
+class AppPrepopulateCommand:
+    async def run(self, prepopulate_file, directory=None):
+        users_service = get_resource_service("users")
+        user = await users_service.find_one_async(username=get_default_user()["username"], req=None)
         if not user:
-            get_resource_service("users").post([get_default_user()])
-        prepopulate_data(prepopulate_file, get_default_user(), directory)
-
-
-superdesk.command("app:prepopulate", AppPrepopulateCommand())
+            await users_service.post_async([get_default_user()])
+        await prepopulate_data(prepopulate_file, get_default_user(), directory)

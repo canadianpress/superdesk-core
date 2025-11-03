@@ -6,9 +6,9 @@ import hermes.backend.inprocess
 
 from urllib.parse import urlparse
 
-from flask import current_app
 from superdesk import json_utils
 from superdesk.logging import logger
+from superdesk.flask import Flask
 
 
 class SuperdeskMangler(hermes.Mangler):
@@ -38,7 +38,12 @@ class SuperdeskCacheBackend(hermes.backend.AbstractBackend):
     or memcached.
     """
 
+    app: Flask
+
     def init_app(self, app):
+        # set app instance for later usage in `_backend`
+        self.app = app
+
         if not hasattr(app, "extensions"):
             app.extensions = {}
 
@@ -74,10 +79,18 @@ class SuperdeskCacheBackend(hermes.backend.AbstractBackend):
 
     @property
     def _backend(self):
-        if not current_app:
-            raise RuntimeError("You can only use cache within app context.")
-        self.init_app(current_app)
-        return current_app.extensions["superdesk_cache"]
+        # TODO-ASYNC: Figure out how to properly fix this as it throws an error
+        # of missing app context when run from async coroutines. For the time being,
+        # using the app instance that is set in the `init_app` method does the trick
+
+        # from superdesk.core import get_current_app
+        # current_app = get_current_app().as_any()
+        # if not current_app:
+        #     raise RuntimeError("You can only use cache within app context.")
+        # self.init_app(current_app)
+        # return current_app.extensions["superdesk_cache"]
+
+        return self.app.extensions["superdesk_cache"]
 
     def lock(self, key):
         return self._backend.lock(key)

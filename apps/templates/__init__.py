@@ -12,12 +12,13 @@ from typing import Any
 import superdesk
 from superdesk import register_jinja_filter
 from superdesk.text_utils import get_text
+from superdesk.types import ContentTypesResourceModel
 from .content_templates import ContentTemplatesResource, ContentTemplatesService, CONTENT_TEMPLATE_PRIVILEGE
 from .content_templates import ContentTemplatesApplyResource, ContentTemplatesApplyService
 from .content_templates import create_scheduled_content  # noqa
-from .content_templates import create_template_for_profile
+from .content_templates import create_template_for_profile, create_template_for_content_type
 from .filters import format_datetime_filter, first_paragraph_filter, iso_datetime, add_timedelta
-from flask_babel import lazy_gettext
+from quart_babel import lazy_gettext
 
 
 def init_app(app) -> None:
@@ -45,3 +46,4 @@ def init_app(app) -> None:
     register_jinja_filter("add_timedelta", add_timedelta)
 
     app.on_inserted_content_types += create_template_for_profile
+    ContentTypesResourceModel.get_signals().data.on_created += create_template_for_content_type

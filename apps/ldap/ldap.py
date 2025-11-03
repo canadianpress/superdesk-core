@@ -12,16 +12,18 @@ import logging
 import re
 from ldap3 import Server, Connection, SUBTREE
 from ldap3.core.exceptions import LDAPException
+
+from superdesk.core import get_app_config
 from apps.auth.service import AuthService
 from superdesk.users.services import UsersService
 from superdesk import get_resource_service
 from superdesk.errors import SuperdeskApiError
 from superdesk.resource import Resource
-from flask import current_app as app
+from superdesk.types import UsersResourceModel
 import superdesk
 from apps.auth.errors import CredentialsAuthError
 from apps.auth import get_user
-from flask_babel import _
+from quart_babel import gettext as _
 
 logger = logging.getLogger(__name__)
 
@@ -125,30 +127,29 @@ class ADAuth:
 
 
 class ADAuthService(AuthService):
-    def on_create(self, docs):
-        user_service = get_resource_service("users")
+    async def on_create_async(self, docs):
+        user_service = UsersResourceModel.get_service()
         for doc in docs:
-            user = self.authenticate(doc)
+            user = await self.authenticate(doc)
 
             if not user.get("_id"):
-                user_service.post([user])
+                await user_service.create([user])
 
             self.set_auth_default(doc, user["_id"])
 
-    def authenticate(self, credentials):
+    async def authenticate(self, credentials):
         """Authenticates the user against Active Directory
 
         :param credentials: an object having "username" and "password" attributes
         :return: if success returns User object, otherwise throws Error
         """
-        settings = app.settings
         ad_auth = ADAuth(
-            settings["LDAP_SERVER"],
-            settings["LDAP_SERVER_PORT"],
-            settings["LDAP_BASE_FILTER"],
-            settings["LDAP_USER_FILTER"],
-            settings["LDAP_USER_ATTRIBUTES"],
-            settings["LDAP_FQDN"],
+            get_app_config("LDAP_SERVER"),
+            get_app_config("LDAP_SERVER_PORT"),
+            get_app_config("LDAP_BASE_FILTER"),
+            get_app_config("LDAP_USER_FILTER"),
+            get_app_config("LDAP_USER_ATTRIBUTES"),
+            get_app_config("LDAP_FQDN"),
         )
 
         username = credentials.get("username")
@@ -168,15 +169,16 @@ class ADAuthService(AuthService):
 
         query = get_user_query(profile_to_import)
 
-        user = superdesk.get_resource_service("users").find_one(req=None, **query)
+        users_service = superdesk.get_resource_service("users")
+        user = await users_service.find_one_async(req=None, **query)
 
         if (
-            app.settings.get("LDAP_SET_DISPLAY_NAME", False)
+            get_app_config("LDAP_SET_DISPLAY_NAME", False)
             and "display_name" in user_data
-            and all(f in user_data for f in app.settings.get("LDAP_SET_DISPLAY_NAME_FIELDS", []))
+            and all(f in user_data for f in get_app_config("LDAP_SET_DISPLAY_NAME_FIELDS", []))
         ):
-            user_data["display_name"] = app.settings.get("LDAP_SET_DISPLAY_NAME_FORMAT", "").format(
-                *[user_data.get(f) for f in app.settings.get("LDAP_SET_DISPLAY_NAME_FIELDS", [])]
+            user_data["display_name"] = get_app_config("LDAP_SET_DISPLAY_NAME_FORMAT", "").format(
+                *[user_data.get(f) for f in get_app_config("LDAP_SET_DISPLAY_NAME_FIELDS", [])]
             )
 
         if not user:
@@ -185,8 +187,8 @@ class ADAuthService(AuthService):
             )
             user = user_data
         else:
-            superdesk.get_resource_service("users").patch(user.get("_id"), user_data)
-            user = superdesk.get_resource_service("users").find_one(req=None, **query)
+            await users_service.patch_async(user.get("_id"), user_data)
+            user = await users_service.find_one_async(req=None, **query)
 
         return user
 
@@ -194,7 +196,7 @@ class ADAuthService(AuthService):
 class ImportUserProfileService(UsersService):
     """Service Class for endpoint /import_profile"""
 
-    def on_create(self, docs):
+    async def on_create_async(self, docs):
         logged_in_user = get_user().get("username")
         for index, doc in enumerate(docs):
             # ensuring the that logged in user is importing the profile.
@@ -204,7 +206,7 @@ class ImportUserProfileService(UsersService):
             try:
                 # authenticate on error sends 401 and the client is redirected to login.
                 # but in case import user profile from Active Directory 403 should be fine.
-                user = get_resource_service("auth_db").authenticate(doc)
+                user = await get_resource_service("auth_db").authenticate(doc)
             except CredentialsAuthError:
                 raise SuperdeskApiError.forbiddenError(message=_("Invalid Credentials."), payload={"credentials": 1})
 
@@ -215,7 +217,7 @@ class ImportUserProfileService(UsersService):
 
             docs[index] = user
 
-        super().on_create(docs)
+        await super().on_create_async(docs)
 
 
 def add_default_values(doc, user_name, user_type, **kwargs):

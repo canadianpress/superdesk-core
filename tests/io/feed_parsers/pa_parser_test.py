@@ -21,66 +21,66 @@ class PAParserTestCase(TestCase):
     Test case for the PA NewsML Parser.
     """
 
-    def setUp(self):
-        super().setUp()
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
         self.dirname = os.path.dirname(os.path.realpath(__file__))
         self.fixture = os.path.normpath(os.path.join(self.dirname, "../fixtures/pa_parser.xml"))
         self.provider = {"name": "Test"}
         with open(self.fixture, "rb") as f:
             xml = etree.parse(f)
-            self.item = PAParser().parse(xml.getroot(), self.provider)
+            self.item = await PAParser().parse(xml.getroot(), self.provider)
 
-    def test_headline(self):
+    async def test_headline(self):
         """
         Test if the headline is correctly parsed.
         """
         self.assertEqual(self.item.get("headline"), "EDINBURGH FESTIVAL FRINGE PROGRAMME LAUNCHED")
 
-    def test_byline(self):
+    async def test_byline(self):
         """
         Test if the byline is correctly parsed.
         """
         self.assertEqual(self.item.get("byline"), "By Sarah Ward, PA Scotland")
 
-    def test_slugline(self):
+    async def test_slugline(self):
         """
         Test if the slugline is correctly parsed.
         """
         self.assertEqual(self.item.get("slugline"), "ARTS Fringe")
 
-    def test_versioncreated(self):
+    async def test_versioncreated(self):
         """
         Test if the versioncreated timestamp is correctly parsed.
         """
         expected = datetime(2025, 6, 2, 10, 46, 50, tzinfo=utc)
         self.assertEqual(self.item.get("versioncreated"), expected)
 
-    def test_firstcreated(self):
+    async def test_firstcreated(self):
         """
         Test if the firstcreated timestamp is correctly parsed.
         """
         expected = datetime(2025, 6, 2, 10, 46, 50, tzinfo=utc)
         self.assertEqual(self.item.get("firstcreated"), expected)
 
-    def test_guid(self):
+    async def test_guid(self):
         """
         Test if the guid is correctly parsed.
         """
         self.assertEqual(self.item.get("guid"), "urn:newsml:pa.press.net:20250602:PA-HHH-ARTS-Fringe:11839114654855")
 
-    def test_priority(self):
+    async def test_priority(self):
         """
         Test if the priority is correctly parsed.
         """
         self.assertEqual(self.item.get("priority"), 4)
 
-    def test_urgency(self):
+    async def test_urgency(self):
         """
         Test if the urgency is correctly parsed.
         """
         self.assertEqual(self.item.get("urgency"), 4)
 
-    def test_subjects(self):
+    async def test_subjects(self):
         """
         Test if subjects are correctly parsed.
         """
@@ -89,19 +89,19 @@ class PAParserTestCase(TestCase):
         self.assertIn({"name": "ARTS", "qcode": "ARTS", "scheme": "topics"}, subjects)
         self.assertIn({"name": "SCOTLAND", "qcode": "SCOTLAND", "scheme": "topics"}, subjects)
 
-    def test_keywords(self):
+    async def test_keywords(self):
         """
         Test if the keywords are correctly parsed.
         """
         self.assertEqual(self.item.get("keywords"), ["Fringe"])
 
-    def test_copyright(self):
+    async def test_copyright(self):
         """
         Test if copyright notice is correctly parsed.
         """
         self.assertEqual(self.item.get("copyrightnotice"), "Press Association")
 
-    def test_body_html(self):
+    async def test_body_html(self):
         """
         Test if the body HTML is correctly parsed.
         """
@@ -114,7 +114,7 @@ class PAParserTestCase(TestCase):
         self.assertNotIn("<chron>", body_html)
         self.assertNotIn("<org>", body_html)
 
-    def test_custom_tags_stripped_from_body(self):
+    async def test_custom_tags_stripped_from_body(self):
         """
         Test that custom tags are stripped from body_html.
         """
@@ -128,19 +128,19 @@ class PAParserTestCase(TestCase):
         self.assertNotIn("<location>", body_html)
         self.assertNotIn("</location>", body_html)
 
-    def test_embargo(self):
+    async def test_embargo(self):
         """
         Test if embargo is correctly parsed.
         """
         self.assertTrue("embargo" in self.item)
 
-    def test_original_source(self):
+    async def test_original_source(self):
         """
         Test if original source is correctly parsed.
         """
         self.assertEqual(self.item.get("original_source"), "The Press Association")
 
-    def test_pubstatus(self):
+    async def test_pubstatus(self):
         """
         Test if pubstatus is correctly parsed.
         """

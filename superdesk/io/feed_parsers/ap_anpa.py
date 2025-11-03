@@ -11,7 +11,7 @@
 from .anpa import ANPAFeedParser
 from superdesk.io.registry import register_feed_parser
 from superdesk.io.iptc import subject_codes
-from flask import current_app as app
+from superdesk.core import get_current_app
 from apps.archive.common import format_dateline_to_locmmmddsrc
 from superdesk.utc import get_date
 from superdesk import get_resource_service
@@ -73,8 +73,8 @@ class AP_ANPAFeedParser(ANPAFeedParser):
         "RGL-": "15048000",
     }
 
-    def parse(self, file_path, provider=None):
-        item = super().parse(file_path, provider)
+    async def parse(self, file_path, provider=None):
+        item = await super().parse(file_path, provider)
         self.ap_derive_dateline(item)
         self.map_category_codes(item)
         self.map_sluglines_to_subjects(item)
@@ -88,6 +88,7 @@ class AP_ANPAFeedParser(ANPAFeedParser):
         :param item:
         :return:
         """
+        # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
         category_code_map = get_resource_service("vocabularies").find_one(req=None, _id="ap_category_map")
         if category_code_map:
             map = {c["ap_code"]: c["category_code"] for c in category_code_map["items"] if c["is_active"]}
@@ -128,7 +129,7 @@ class AP_ANPAFeedParser(ANPAFeedParser):
                         city = city.split(",")[0]
                         if any(char.isdigit() for char in city):
                             return
-                        cities = app.locators.find_cities()
+                        cities = get_current_app().locators.find_cities()
                         located = [c for c in cities if c["city"].lower() == city.lower()]
                         item.setdefault("dateline", {})
                         item["dateline"]["located"] = (

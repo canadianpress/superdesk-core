@@ -17,17 +17,16 @@ thus essentially just a normal `Flask <http://flask.pocoo.org/>`_ application.
 """
 
 import os
-import flask
 import importlib
 
-from eve import Eve
 from eve.io.mongo.mongo import MongoJSONEncoder
 
+from superdesk.flask import Config
 from superdesk.datalayer import SuperdeskDataLayer
 from superdesk.factory.elastic_apm import setup_apm
 from superdesk.validator import SuperdeskValidator
 from superdesk.factory.app import SuperdeskEve, set_error_handlers, get_media_storage_class
-from superdesk.factory.sentry import SuperdeskSentry
+from superdesk.cache import cache_backend
 
 from prod_api.auth import JWTAuth
 
@@ -41,7 +40,7 @@ def get_app(config=None):
     :return: a new SuperdeskEve app instance
     """
 
-    app_config = flask.Config(".")
+    app_config = Config(".")
 
     # default config
     app_config.from_object("prod_api.app.settings")
@@ -81,6 +80,7 @@ def get_app(config=None):
 
     set_error_handlers(app)
     setup_apm(app, "Production API")
+    cache_backend.init_app(app)
 
     for module_name in app.config.get("PRODAPI_INSTALLED_APPS", []):
         app_module = importlib.import_module(module_name)
@@ -90,8 +90,6 @@ def get_app(config=None):
             pass
         else:
             init_app(app)
-
-    app.sentry = SuperdeskSentry(app)
 
     return app
 

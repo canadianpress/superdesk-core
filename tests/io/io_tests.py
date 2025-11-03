@@ -9,12 +9,9 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 import os
-import flask
-import unittest
 
 from datetime import timedelta
 
-from superdesk.tests import AppTestCase
 from superdesk.io.feeding_services import OLD_CONTENT_MINUTES
 from superdesk.utc import utcnow
 from superdesk.etree import etree
@@ -25,6 +22,8 @@ from superdesk.io.feed_parsers.newsml_2_0 import NewsMLTwoFeedParser
 from superdesk.io.feed_parsers.nitf import NITFFeedParser
 from superdesk.io.feeding_services.file_service import FileFeedingService
 
+from superdesk.tests import TestCase, AsyncTestCase
+
 
 def get_etree(filename):
     dirname = os.path.dirname(os.path.realpath(__file__))
@@ -32,13 +31,8 @@ def get_etree(filename):
         return etree.fromstring(f.read().encode("utf-8"))
 
 
-class UtilsTest(unittest.TestCase):
-    def setUp(self):
-        self.app = flask.Flask(__name__)
-        self.app.config[OLD_CONTENT_MINUTES] = 10
-        self.ctx = self.app.app_context()
-        self.ctx.push()
-        self.addCleanup(self.ctx.pop)
+class UtilsTest(AsyncTestCase):
+    app_config = {OLD_CONTENT_MINUTES: 10}
 
     def test_get_word_count(self):
         self.assertEqual(2, get_word_count("plain text"), "plain text")
@@ -64,20 +58,22 @@ class UtilsTest(unittest.TestCase):
             ),
         )
 
-    def test_get_xml_parser_newsmlg2(self):
+    async def test_get_xml_parser_newsmlg2(self):
         etree = get_etree("snep.xml")
         self.assertIsInstance(
-            FileFeedingService().get_feed_parser({"feed_parser": "newsml2"}, etree), NewsMLTwoFeedParser
+            await FileFeedingService().get_feed_parser({"feed_parser": "newsml2"}, etree), NewsMLTwoFeedParser
         )
 
-    def test_get_xml_parser_nitf(self):
+    async def test_get_xml_parser_nitf(self):
         etree = get_etree("nitf-fishing.xml")
-        self.assertIsInstance(FileFeedingService().get_feed_parser({"feed_parser": "nitf"}, etree), NITFFeedParser)
+        self.assertIsInstance(
+            await FileFeedingService().get_feed_parser({"feed_parser": "nitf"}, etree), NITFFeedParser
+        )
 
-    def test_get_xml_parser_newsml12(self):
+    async def test_get_xml_parser_newsml12(self):
         etree = get_etree("afp.xml")
         self.assertIsInstance(
-            FileFeedingService().get_feed_parser({"feed_parser": "newsml12"}, etree), NewsMLOneFeedParser
+            await FileFeedingService().get_feed_parser({"feed_parser": "newsml12"}, etree), NewsMLOneFeedParser
         )
 
     def test_is_old_content(self):
@@ -86,20 +82,20 @@ class UtilsTest(unittest.TestCase):
         self.assertTrue(service.is_old_content(utcnow() - timedelta(minutes=11)))
 
 
-class ItemTest(AppTestCase):
-    def setUpFixture(self, filename):
+class ItemTest(TestCase):
+    async def setUpFixture(self, filename):
         self.tree = get_etree(filename)
         provider = {"name": "Test"}
 
         for parser in registered_feed_parsers.values():
             if parser.can_parse(self.tree):
-                self.item = parser.parse(self.tree, provider)[0]
+                self.item = (await parser.parse(self.tree, provider))[0]
 
 
 class TextParserTest(ItemTest):
-    def setUp(self):
-        super().setUp()
-        self.setUpFixture("text.xml")
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        await self.setUpFixture("text.xml")
 
     def test_instance(self):
         self.assertTrue(self.item)
@@ -142,9 +138,9 @@ class TextParserTest(ItemTest):
 
 
 class PictureParserTest(ItemTest):
-    def setUp(self):
-        super().setUp()
-        self.setUpFixture("picture.xml")
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        await self.setUpFixture("picture.xml")
 
     def test_type(self):
         self.assertEqual("picture", self.item.get("type"))
@@ -188,9 +184,9 @@ class PictureParserTest(ItemTest):
 
 
 class SNEPParserTest(ItemTest):
-    def setUp(self):
-        super().setUp()
-        self.setUpFixture("snep.xml")
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        await self.setUpFixture("snep.xml")
 
     def test_content_set(self):
         self.assertEqual(4, self.item.get("priority"))

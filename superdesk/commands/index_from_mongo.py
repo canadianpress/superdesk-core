@@ -9,16 +9,25 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 import time
-import pymongo
-import superdesk
 
-from flask import current_app as app
-from superdesk.errors import BulkIndexError
-from superdesk import config
+import click
+import pymongo
 from bson.objectid import ObjectId
 
+from superdesk.resource_fields import ID_FIELD
+from superdesk.errors import BulkIndexError
+from superdesk.core import get_current_async_app
 
-class IndexFromMongo(superdesk.Command):
+from .async_cli import cli
+
+
+@cli.command("app:index_from_mongo")
+@click.option("--from", "-f", "collection_name")
+@click.option("--all", "all_collections", is_flag=True)
+@click.option("--page-size", "-p")
+@click.option("--last-id")
+@click.option("--string-id", is_flag=True, help="Treat the id's as strings")
+async def cli_index_from_mongo(collection_name, all_collections, page_size, last_id, string_id):
     """Index the specified mongo collection in the specified elastic collection/type.
 
     This will use the default APP mongo DB to read the data and the default Elastic APP index.
@@ -33,28 +42,39 @@ class IndexFromMongo(superdesk.Command):
 
     """
 
-    option_list = [
-        superdesk.Option("--from", "-f", dest="collection_name"),
-        superdesk.Option("--all", action="store_true", dest="all_collections"),
-        superdesk.Option("--page-size", "-p"),
-        superdesk.Option("--last-id"),
-        superdesk.Option("--string-id", dest="string_id", action="store_true", help="Treat the id's as strings"),
-    ]
+    await IndexFromMongo().run(collection_name, all_collections, page_size, last_id, string_id)
+
+
+class IndexFromMongo:
     default_page_size = 500
 
-    def run(self, collection_name, all_collections, page_size, last_id, string_id):
+    async def run(self, collection_name, all_collections, page_size, last_id, string_id):
         if not collection_name and not all_collections:
             raise SystemExit("Specify --all to index from all collections")
         elif all_collections:
-            app.data.init_elastic(app)
+            async_app = get_current_async_app()
+            app = async_app.wsgi
+            await app.data.init_elastic(app)
             resources = app.data.get_elastic_resources()
+            resources_processed = []
+            for resource_config in async_app.resources.get_all_configs():
+                if resource_config.elastic is None:
+                    continue
+                self.copy_resource(resource_config.name, page_size)
+                resources_processed.append(resource_config.name)
+
             for resource in resources:
+                if resource in resources_processed:
+                    # This resource has already been processed by the new app
+                    # No need to re-index this resource
+                    continue
                 self.copy_resource(resource, page_size)
         else:
             self.copy_resource(collection_name, page_size, last_id, string_id)
 
     @classmethod
     def copy_resource(cls, resource, page_size, last_id=None, string_id=False):
+        async_app = get_current_async_app()
         for items in cls.get_mongo_items(resource, page_size, last_id, string_id):
             print("{} Inserting {} items".format(time.strftime("%X %x %Z"), len(items)))
             s = time.time()
@@ -62,7 +82,11 @@ class IndexFromMongo(superdesk.Command):
 
             for i in range(1, 4):
                 try:
-                    success, failed = app.data._search_backend(resource).bulk_insert(resource, items)
+                    try:
+                        success, failed = async_app.elastic.get_client(resource).bulk_insert(items)
+                    except KeyError:
+                        app = async_app.wsgi
+                        success, failed = app.data._search_backend(resource).bulk_insert(resource, items)
                 except Exception as ex:
                     print("Exception thrown on insert to elastic {}", ex)
                     time.sleep(10)
@@ -88,9 +112,15 @@ class IndexFromMongo(superdesk.Command):
         """
         bucket_size = int(page_size) if page_size else cls.default_page_size
         print("Indexing data from mongo/{} to elastic/{}".format(mongo_collection_name, mongo_collection_name))
+        async_app = get_current_async_app()
 
-        db = app.data.get_mongo_collection(mongo_collection_name)
-        args = {"limit": bucket_size, "sort": [(config.ID_FIELD, pymongo.ASCENDING)]}
+        try:
+            db = async_app.mongo.get_collection(mongo_collection_name)
+        except KeyError:
+            app = async_app.wsgi
+            db = app.data.get_mongo_collection(mongo_collection_name)
+
+        args = {"limit": bucket_size, "sort": [(ID_FIELD, pymongo.ASCENDING)]}
 
         while True:
             if last_id:
@@ -99,15 +129,12 @@ class IndexFromMongo(superdesk.Command):
                         last_id = ObjectId(last_id)
                     except Exception:
                         pass
-                args.update({"filter": {config.ID_FIELD: {"$gt": last_id}}})
+                args.update({"filter": {ID_FIELD: {"$gt": last_id}}})
 
             cursor = db.find(**args)
-            if not cursor.count():
+            items = list(cursor)
+            if not len(items):
                 print("Last id", mongo_collection_name, last_id)
                 break
-            items = list(cursor)
-            last_id = items[-1][config.ID_FIELD]
+            last_id = items[-1][ID_FIELD]
             yield items
-
-
-superdesk.command("app:index_from_mongo", IndexFromMongo())

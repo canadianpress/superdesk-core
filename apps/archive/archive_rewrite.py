@@ -11,9 +11,13 @@
 import logging
 from apps.auth import get_user, get_user_id
 from eve.versioning import resolve_document_version
-from flask import request, current_app as app
+
+from superdesk.core import get_current_app, get_app_config
+from superdesk.eve_async.service import AsyncBaseService
+from superdesk.resource_fields import ID_FIELD
+from superdesk.flask import request
 from apps.archive import ArchiveSpikeService
-from superdesk import get_resource_service, Service, config
+from superdesk import get_resource_service, Service
 from superdesk.metadata.item import (
     ITEM_STATE,
     EMBARGO,
@@ -36,7 +40,7 @@ from apps.archive.common import (
     ITEM_REWRITE,
     ITEM_UNLINK,
     ITEM_LINK,
-    insert_into_versions,
+    insert_into_versions_async,
 )
 from superdesk.metadata.utils import item_url, generate_guid
 from superdesk.workflow import is_workflow_state_transition_valid
@@ -45,7 +49,7 @@ from superdesk.notification import push_notification
 from superdesk.signals import item_rewrite
 from apps.archive.archive import update_associations
 from superdesk.editor_utils import generate_fields, copy_fields
-from flask_babel import _
+from quart_babel import gettext as _
 from superdesk.utc import utcnow
 
 logger = logging.getLogger(__name__)
@@ -74,22 +78,24 @@ class ArchiveRewriteResource(Resource):
     privileges = {"POST": "rewrite", "DELETE": "rewrite"}
 
 
-class ArchiveRewriteService(Service):
-    def get(self, req, lookup):
+class ArchiveRewriteService(AsyncBaseService):
+    async def get_async(self, req, lookup):
         if lookup.get("original_id"):
-            return super().get(req, {"_id": lookup["original_id"]})
-        return super().get(req, lookup)
+            return await super().get_async(req, {"_id": lookup["original_id"]})
+        return await super().get_async(req, lookup)
 
-    def create(self, docs, **kwargs):
+    async def create_async(self, docs, **kwargs):
         doc = docs[0] if len(docs) > 0 else {}
         original_id = request.view_args["original_id"]
         update_document = doc.get("update")
 
         archive_service = get_resource_service(ARCHIVE)
-        original = archive_service.find_one(req=None, _id=original_id)
+        original = await archive_service.find_one_async(req=None, _id=original_id)
         self._validate_rewrite(original, update_document)
 
-        rewrite = self._create_rewrite_article(original, existing_item=update_document, desk_id=doc.get("desk_id"))
+        rewrite = await self._create_rewrite_article(
+            original, existing_item=update_document, desk_id=doc.get("desk_id")
+        )
 
         # sync editor state
         copy_fields(original, rewrite, ignore_empty=True)
@@ -105,24 +111,25 @@ class ArchiveRewriteService(Service):
 
         # signal
         item_rewrite.send(self, item=rewrite, original=original)
+        app = get_current_app().as_any()
 
         if update_document:
             # process the existing story
-            archive_service.patch(update_document[config.ID_FIELD], rewrite)
-            app.on_archive_item_updated(rewrite, update_document, ITEM_LINK)
-            rewrite[config.ID_FIELD] = update_document[config.ID_FIELD]
-            ids = [update_document[config.ID_FIELD]]
+            await archive_service.patch_async(update_document[ID_FIELD], rewrite)
+            await app.on_archive_item_updated.call_async(rewrite, update_document, ITEM_LINK)
+            rewrite[ID_FIELD] = update_document[ID_FIELD]
+            ids = [update_document[ID_FIELD]]
         else:
             # Set the version.
             resolve_document_version(rewrite, ARCHIVE, "POST")
-            ids = archive_service.post([rewrite])
-            insert_into_versions(doc=rewrite)
+            ids = await archive_service.post_async([rewrite])
+            await insert_into_versions_async(doc=rewrite)
             build_custom_hateoas(CUSTOM_HATEOAS, rewrite)
 
-            app.on_archive_item_updated({"rewrite_of": rewrite.get("rewrite_of")}, rewrite, ITEM_LINK)
+            await app.on_archive_item_updated.call_async({"rewrite_of": rewrite.get("rewrite_of")}, rewrite, ITEM_LINK)
 
-        self._add_rewritten_flag(original, rewrite)
-        get_resource_service("archive_broadcast").on_broadcast_master_updated(
+        await self._add_rewritten_flag(original, rewrite)
+        await get_resource_service("archive_broadcast").on_broadcast_master_updated(
             ITEM_CREATE, item=original, rewrite_id=ids[0]
         )
 
@@ -150,16 +157,15 @@ class ArchiveRewriteService(Service):
         if original.get("rewritten_by"):
             raise SuperdeskApiError.badRequestError(message=_("Article has been rewritten before !"))
 
-        if (
-            not is_workflow_state_transition_valid("rewrite", original[ITEM_STATE])
-            and not config.ALLOW_UPDATING_SCHEDULED_ITEMS
+        if not is_workflow_state_transition_valid("rewrite", original[ITEM_STATE]) and not get_app_config(
+            "ALLOW_UPDATING_SCHEDULED_ITEMS"
         ):
             raise InvalidStateTransitionError()
 
         if (
             original.get("rewrite_of")
             and not (original.get(ITEM_STATE) in PUBLISH_STATES)
-            and not app.config["WORKFLOW_ALLOW_MULTIPLE_UPDATES"]
+            and not get_app_config("WORKFLOW_ALLOW_MULTIPLE_UPDATES")
         ):
             raise SuperdeskApiError.badRequestError(
                 message=_("Rewrite is not published. Cannot rewrite the story again.")
@@ -193,7 +199,7 @@ class ArchiveRewriteService(Service):
                     _("Rewrite item content profile does " "not match with Original item.")
                 )
 
-    def _create_rewrite_article(self, original, existing_item=None, desk_id=None):
+    async def _create_rewrite_article(self, original, existing_item=None, desk_id=None):
         """Creates a new story and sets the metadata from original.
 
         :param dict original: original story
@@ -216,8 +222,8 @@ class ArchiveRewriteService(Service):
         ]
         existing_item_preserve_fields = (ASSOCIATIONS, "flags", "extra")
 
-        if app.config.get("COPY_ON_REWRITE_FIELDS"):
-            fields.extend(app.config["COPY_ON_REWRITE_FIELDS"])
+        if get_app_config("COPY_ON_REWRITE_FIELDS"):
+            fields.extend(get_app_config("COPY_ON_REWRITE_FIELDS"))
 
         if existing_item:
             # for associate an existing file as update merge subjects
@@ -276,11 +282,11 @@ class ArchiveRewriteService(Service):
             rewrite["flags"]["marked_for_sms"] = False
 
         # SD-4595 - Default value for the update article to be set based on the system config.
-        if config.RESET_PRIORITY_VALUE_FOR_UPDATE_ARTICLES:
+        if get_app_config("RESET_PRIORITY_VALUE_FOR_UPDATE_ARTICLES"):
             # if True then reset to the default priority value.
-            rewrite["priority"] = int(config.DEFAULT_PRIORITY_VALUE_FOR_MANUAL_ARTICLES)
+            rewrite["priority"] = int(get_app_config("DEFAULT_PRIORITY_VALUE_FOR_MANUAL_ARTICLES"))
 
-        rewrite["rewrite_of"] = original[config.ID_FIELD]
+        rewrite["rewrite_of"] = original[ID_FIELD]
         rewrite["rewrite_sequence"] = (original.get("rewrite_sequence") or 0) + 1
         rewrite.pop(PROCESSED_FROM, None)
 
@@ -288,7 +294,7 @@ class ArchiveRewriteService(Service):
             from apps.tasks import send_to
 
             # send the document to the desk only if a new rewrite is created
-            send_to(
+            await send_to(
                 doc=rewrite,
                 desk_id=(desk_id or original["task"]["desk"]),
                 default_stage="working_stage",
@@ -303,21 +309,22 @@ class ArchiveRewriteService(Service):
         self._set_take_key(rewrite)
         return rewrite
 
-    def _add_rewritten_flag(self, original, rewrite):
+    async def _add_rewritten_flag(self, original, rewrite):
         """Adds rewritten_by field to the existing published items.
 
         :param dict original: item on which rewrite is triggered
         :param dict rewrite: rewritten document
         """
-        get_resource_service("published").update_published_items(
-            original[config.ID_FIELD], "rewritten_by", rewrite[config.ID_FIELD]
+        await get_resource_service("published").update_published_items(
+            original[ID_FIELD], "rewritten_by", rewrite[ID_FIELD]
         )
 
         # modify the original item as well.
-        get_resource_service(ARCHIVE).system_update(
-            original[config.ID_FIELD], {"rewritten_by": rewrite[config.ID_FIELD]}, original
+        await get_resource_service(ARCHIVE).system_update_async(
+            original[ID_FIELD], {"rewritten_by": rewrite[ID_FIELD]}, original
         )
-        app.on_archive_item_updated({"rewritten_by": rewrite[config.ID_FIELD]}, original, ITEM_REWRITE)
+        app = get_current_app().as_any()
+        await app.on_archive_item_updated.call_async({"rewritten_by": rewrite[ID_FIELD]}, original, ITEM_REWRITE)
 
     def _set_take_key(self, rewrite):
         """Sets the anpa take key of the rewrite with ordinal.
@@ -338,15 +345,15 @@ class ArchiveRewriteService(Service):
         else:
             return str(n) + {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
 
-    def delete(self, lookup):
+    async def delete_async(self, lookup):
         target_id = request.view_args["original_id"]
         archive_service = get_resource_service(ARCHIVE)
-        target = archive_service.find_one(req=None, _id=target_id)
+        target = await archive_service.find_one_async(req=None, _id=target_id)
         updates = {}
 
         if target.get("rewrite_of"):
             # remove the rewrite info
-            ArchiveSpikeService().update_rewrite(target)
+            await ArchiveSpikeService().update_rewrite(target)
 
         if not target.get("rewrite_of"):
             # there is nothing to do
@@ -366,7 +373,8 @@ class ArchiveRewriteService(Service):
 
         updates["event_id"] = generate_guid(type=GUID_TAG)
 
-        archive_service.system_update(target_id, updates, target)
+        await archive_service.system_update_async(target_id, updates, target)
         user = get_user(required=True)
-        push_notification("item:unlink", item=target_id, user=str(user.get(config.ID_FIELD)))
-        app.on_archive_item_updated(updates, target, ITEM_UNLINK)
+        push_notification("item:unlink", item=target_id, user=str(user.get(ID_FIELD)))
+        app = get_current_app().as_any()
+        await app.on_archive_item_updated.call_async(updates, target, ITEM_UNLINK)

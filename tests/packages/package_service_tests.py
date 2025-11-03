@@ -10,11 +10,13 @@
 
 from superdesk.tests import TestCase
 
-from apps.packages.package_service import PackageService
+from apps import archive  # noqa  - fix circular imports when running this test
+from superdesk.publish_async.utils import remove_ref_from_inmem_package
 
 
 class PackageServiceTestCase(TestCase):
-    def setUp(self):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
         self.package1 = {
             "groups": [
                 {"id": "root", "refs": [{"idRef": "main"}, {"idRef": "sidebars"}], "role": "grpRole:NEP"},
@@ -64,16 +66,15 @@ class PackageServiceTestCase(TestCase):
         }
 
     def test_remove_ref_from_package(self):
-        with self.app.app_context():
-            anything_left = PackageService().remove_ref_from_inmem_package(self.package1, "456")
-            self.assertEqual(len(self.package1.get("groups", [])), 2)
-            root_group = self.package1.get("groups", [])[0]
-            self.assertEqual(len(root_group.get("refs", [])), 1)
-            self.assertTrue(anything_left)
+        anything_left = remove_ref_from_inmem_package(self.package1, "456")
+        self.assertEqual(len(self.package1.get("groups", [])), 2)
+        root_group = self.package1.get("groups", [])[0]
+        self.assertEqual(len(root_group.get("refs", [])), 1)
+        self.assertTrue(anything_left)
 
     def test_remove_two_refs_from_package(self):
-        anything_left1 = PackageService().remove_ref_from_inmem_package(self.package1, "456")
-        anything_left2 = PackageService().remove_ref_from_inmem_package(self.package1, "123")
+        anything_left1 = remove_ref_from_inmem_package(self.package1, "456")
+        anything_left2 = remove_ref_from_inmem_package(self.package1, "123")
         self.assertEqual(len(self.package1.get("groups", [])), 2)
         root_group = self.package1.get("groups", [])[0]
         self.assertEqual(len(root_group.get("refs", [])), 1)
@@ -81,16 +82,16 @@ class PackageServiceTestCase(TestCase):
         self.assertTrue(anything_left2)
 
     def test_remove_two_refs_from_package2(self):
-        PackageService().remove_ref_from_inmem_package(self.package1, "789")
-        PackageService().remove_ref_from_inmem_package(self.package1, "123")
+        remove_ref_from_inmem_package(self.package1, "789")
+        remove_ref_from_inmem_package(self.package1, "123")
         self.assertEqual(len(self.package1.get("groups", [])), 2)
         root_group = self.package1.get("groups", [])[0]
         self.assertEqual(len(root_group.get("refs", [])), 1)
 
     def test_remove_all_refs_from_package(self):
-        anything_left1 = PackageService().remove_ref_from_inmem_package(self.package1, "456")
-        anything_left2 = PackageService().remove_ref_from_inmem_package(self.package1, "789")
-        anything_left3 = PackageService().remove_ref_from_inmem_package(self.package1, "123")
+        anything_left1 = remove_ref_from_inmem_package(self.package1, "456")
+        anything_left2 = remove_ref_from_inmem_package(self.package1, "789")
+        anything_left3 = remove_ref_from_inmem_package(self.package1, "123")
         self.assertEqual(len(self.package1.get("groups", [])), 1)
         root_group = self.package1.get("groups", [])[0]
         self.assertEqual(len(root_group.get("refs", [])), 0)

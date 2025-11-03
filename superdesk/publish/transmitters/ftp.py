@@ -13,8 +13,8 @@ import logging
 import superdesk
 from urllib.parse import urlparse
 from io import BytesIO
-from flask import current_app as app
 
+from superdesk.core import get_current_app
 from superdesk.ftp import ftp_connect
 from superdesk.publish import register_transmitter, registered_transmitter_file_providers
 from superdesk.publish.publish_service import get_publish_service, PublishService
@@ -53,27 +53,27 @@ class FTPPublishService(PublishService):
             "path": url_parts.path.lstrip("/"),
         }
 
-    def _get_published_item(self, queue_item):
+    async def _get_published_item(self, queue_item):
         try:
             return json.loads(queue_item["formatted_item"])
         except json.JSONDecodeError as ex:
-            return superdesk.get_resource_service("published").find_one(
+            return await superdesk.get_resource_service("published").find_one_async(
                 req=None,
                 item_id=queue_item["item_id"],
                 _current_version=queue_item["item_version"],
             )
 
-    def _transmit(self, queue_item, subscriber):
+    async def _transmit(self, queue_item, subscriber):
         config = queue_item.get("destination", {}).get("config", {})
 
         try:
-            with ftp_connect(config) as ftp:
+            async with ftp_connect(config) as ftp:
                 if config.get("push_associated", False):
                     # Set the working directory for the associated files
                     if "associated_path" in config and config.get("associated_path"):
                         ftp.cwd("/" + config.get("associated_path", "").lstrip("/"))
 
-                    item = self._get_published_item(queue_item)
+                    item = await self._get_published_item(queue_item)
                     if item:
                         self._copy_published_media_files(item, ftp)
 
@@ -87,7 +87,7 @@ class FTPPublishService(PublishService):
         except PublishFtpError:
             raise
         except Exception as ex:
-            raise PublishFtpError.ftpError(ex, queue_item.get("destination"))
+            raise await PublishFtpError.ftpError(ex, queue_item.get("destination")).send_notifications()
 
     def _copy_published_media_files(self, item, ftp):
         media = {}
@@ -98,6 +98,7 @@ class FTPPublishService(PublishService):
         remote_items = []
         ftp.retrlines("LIST", remote_items.append)
 
+        app = get_current_app()
         for media_id, rendition in media.items():
             if not self._media_exists(rendition, remote_items):
                 binary = app.media.get(media_id, resource=rendition.get("resource", "upload"))

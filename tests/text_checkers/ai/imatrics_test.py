@@ -37,7 +37,8 @@ class IMatricsTestCase(TestCase):
         "slugline": "test imatrics",
     }
 
-    def setUp(self):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
         self.app.config["IMATRICS_BASE_URL"] = TEST_BASE_URL
         self.app.config["IMATRICS_USER"] = "some_user"
         self.app.config["IMATRICS_KEY"] = "some_secret_key"
@@ -46,7 +47,7 @@ class IMatricsTestCase(TestCase):
         tools.import_services(self.app, ai.__name__, AIServiceBase)
 
     @responses.activate
-    def test_autotagging(self):
+    async def test_autotagging(self):
         """Check that autotagging is working"""
         self.app.data.insert(
             "vocabularies",
@@ -150,7 +151,7 @@ class IMatricsTestCase(TestCase):
             },
         )
 
-        ai_service.create([doc])
+        await ai_service.create_async([doc])
 
         expected = {
             "subject": [
@@ -211,7 +212,7 @@ class IMatricsTestCase(TestCase):
         self.assertEqual(doc["analysis"], expected)
 
     @responses.activate
-    def test_search(self):
+    async def test_search(self):
         """Tag searching is returning tags"""
         doc = {
             "service": "imatrics",
@@ -257,7 +258,7 @@ class IMatricsTestCase(TestCase):
                 "scrollID": "9e7da4cf-541f-36b1-b7a0-aa883a76c04f",
             },
         )
-        ai_data_op_service.create([doc])
+        await ai_data_op_service.create_async([doc])
 
         expected = {
             "tags": {
@@ -298,7 +299,7 @@ class IMatricsTestCase(TestCase):
         self.assertEqual(doc["result"], expected)
 
     @responses.activate
-    def test_create(self):
+    async def test_create(self):
         """Tag can be created"""
         doc = {
             "service": "imatrics",
@@ -312,11 +313,11 @@ class IMatricsTestCase(TestCase):
             api_url,
             json={"response": "Concept created with uuid: 6083cb74-77b7-3046-8187-a6333b76b5a4.", "error": False},
         )
-        ai_data_op_service.create([doc])
+        await ai_data_op_service.create_async([doc])
         self.assertEqual(doc["result"], {})
 
     @responses.activate
-    def test_create_fail(self):
+    async def test_create_fail(self):
         """Tag creation conflict report raise an error"""
         doc = {
             "service": "imatrics",
@@ -335,13 +336,13 @@ class IMatricsTestCase(TestCase):
             },
         )
         with self.assertRaises(SuperdeskApiError) as cm:
-            ai_data_op_service.create([doc])
+            await ai_data_op_service.create_async([doc])
 
         exc = cm.exception
         self.assertEqual(exc.status_code, 502)
 
     @responses.activate
-    def test_delete(self):
+    async def test_delete(self):
         """Tag can be deleted"""
         doc = {
             "service": "imatrics",
@@ -355,12 +356,12 @@ class IMatricsTestCase(TestCase):
             api_url,
             json={"error": False},
         )
-        ai_data_op_service.create([doc])
+        await ai_data_op_service.create_async([doc])
 
         self.assertEqual(doc["result"], {})
 
     @responses.activate
-    def test_feedback(self):
+    async def test_feedback(self):
         """Send feedback to the service on save."""
         doc = {
             "service": "imatrics",
@@ -439,7 +440,7 @@ class IMatricsTestCase(TestCase):
         )
 
         ai_data_op_service = get_resource_service("ai_data_op")
-        ai_data_op_service.create([doc])
+        await ai_data_op_service.create_async([doc])
 
         self.assertEqual(len(responses.calls), 1)
         self.assertEqual(

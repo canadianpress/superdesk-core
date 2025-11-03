@@ -8,8 +8,8 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
-from flask import current_app
-from .commands import RemoveExpiredItems  # noqa
+from superdesk.core import get_app_config
+from .commands import cli_content_api_remove_expired  # noqa
 
 
 MONGO_PREFIX = "CONTENTAPI_MONGO"
@@ -21,4 +21,4 @@ def is_enabled():
 
     It can be turned off via ``CONTENTAPI_ENABLED`` setting.
     """
-    return current_app.config.get("CONTENTAPI_ENABLED", True)
+    return get_app_config("CONTENTAPI_ENABLED", True)

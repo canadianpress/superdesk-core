@@ -3,18 +3,20 @@ import bson
 import superdesk
 
 from copy import deepcopy
-from eve.utils import config
+
+from superdesk.resource_fields import ID_FIELD
 from superdesk import get_resource_service
 from superdesk.errors import SuperdeskApiError
 from superdesk.default_schema import DEFAULT_SCHEMA, DEFAULT_EDITOR, DEFAULT_SCHEMA_MAP
 from apps.auth import get_user_id
-from apps.desks import remove_profile_from_desks
+from apps.desks import remove_profile_from_desks_async
 from eve.utils import ParsedRequest
-from superdesk.resource import build_custom_hateoas, not_analyzed
-from flask_babel import _
+from superdesk.resource import build_custom_hateoas
+from quart_babel import gettext as _
+from superdesk.eve_async.service import CachableAsyncBaseService
 from superdesk.utc import utcnow
 from superdesk.utils import format_content_type_name
-from superdesk.services import CacheableService
+from superdesk.types import DesksResourceModel
 
 
 CONTENT_TYPE_PRIVILEGE = "content_type"
@@ -54,6 +56,7 @@ HARDCODED_CVS = ("languages",)
 
 
 class ContentTypesResource(superdesk.Resource):
+    # internal_resource = True
     schema = {
         "_id": {
             "type": "string",
@@ -126,34 +129,34 @@ class ContentTypesResource(superdesk.Resource):
     }
 
 
-class ContentTypesService(CacheableService):
+class ContentTypesService(CachableAsyncBaseService):
     def _set_updated_by(self, doc):
         doc["updated_by"] = get_user_id()
 
     def _set_created_by(self, doc):
         doc["created_by"] = get_user_id()
 
-    def on_create(self, docs):
+    async def on_create_async(self, docs: list[dict]) -> None:
         for doc in docs:
             self._set_updated_by(doc)
             self._set_created_by(doc)
 
-    def on_delete(self, doc):
+    async def on_delete_async(self, doc: dict) -> None:
         if doc.get("is_used"):
             raise SuperdeskApiError(status_code=202, payload={"is_used": True})
-        remove_profile_from_templates(doc)
-        remove_profile_from_desks(doc)
+        await remove_profile_from_templates(doc)
+        await remove_profile_from_desks_async(doc)
 
-    def on_update(self, updates, original):
-        self._validate_disable(updates, original)
+    async def on_update_async(self, updates: dict, original: dict) -> None:
+        await self._validate_disable(updates, original)
         self._set_updated_by(updates)
         prepare_for_save_content_type(original, updates)
-        self._update_template_fields(updates, original)
+        await self._update_template_fields(updates, original)
 
-    def on_delete_res_vocabularies(self, doc):
+    async def on_delete_res_vocabularies(self, doc):
         req = ParsedRequest()
         req.projection = '{"label": 1}'
-        res = self.get(req=req, lookup={"schema." + doc[config.ID_FIELD]: {"$type": 3}})
+        res = self.get(req=req, lookup={"schema." + doc[ID_FIELD]: {"$type": 3}})
         if res.count():
             payload = {"content_types": [doc_hateoas for doc_hateoas in map(self._build_hateoas, res)]}
             message = _("Vocabulary {vocabulary} is used in {count} content type(s)").format(
@@ -165,14 +168,14 @@ class ContentTypesService(CacheableService):
         build_custom_hateoas({"self": {"title": "Content Profile", "href": "/content_types/{_id}"}}, doc)
         return doc
 
-    def _validate_disable(self, updates, original):
+    async def _validate_disable(self, updates, original):
         """
         Checks the templates and desks that are referencing the given
         content profile if the profile is being disabled
         """
         if "enabled" in updates and updates.get("enabled") is False and original.get("enabled") is True:
-            templates = list(
-                superdesk.get_resource_service("content_templates").get_templates_by_profile_id(original.get("_id"))
+            templates = await superdesk.get_resource_service("content_templates").get_templates_by_profile_id(
+                original.get("_id")
             )
 
             if len(templates) > 0:
@@ -183,8 +186,7 @@ class ContentTypesService(CacheableService):
                     ).format(templates=template_names)
                 )
 
-            req = ParsedRequest()
-            all_desks = list(superdesk.get_resource_service("desks").get(req=req, lookup={}))
+            all_desks = [desk async for desk in DesksResourceModel.get_service().get_all_raw()]
             profile_desks = [
                 desk for desk in all_desks if desk.get("default_content_profile") == str(original.get("_id"))
             ]
@@ -197,7 +199,7 @@ class ContentTypesService(CacheableService):
                     )
                 )
 
-    def _update_template_fields(self, updates, original):
+    async def _update_template_fields(self, updates, original):
         """
         Finds the templates that are referencing the given
         content profile an clears the disabled fields
@@ -206,8 +208,8 @@ class ContentTypesService(CacheableService):
         # these are the only fields of templates that don't depend on the schema.
         template_metadata_fields = ["usageterms"]
 
-        templates = list(
-            superdesk.get_resource_service("content_templates").get_templates_by_profile_id(original.get("_id"))
+        templates = await superdesk.get_resource_service("content_templates").get_templates_by_profile_id(
+            original.get("_id")
         )
 
         for template in templates:
@@ -219,25 +221,27 @@ class ContentTypesService(CacheableService):
                     data.pop(field, None)
                     processed = True
             if processed:
-                superdesk.get_resource_service("content_templates").patch(template.get("_id"), {"data": data})
+                await superdesk.get_resource_service("content_templates").patch_async(
+                    template.get("_id"), {"data": data}
+                )
 
-    def find_one(self, req, **lookup):
+    async def find_one_async(self, req: ParsedRequest | None, **lookup) -> dict | None:
         is_edit = req and "edit" in req.args
-        doc = super().find_one(req, **lookup)
+        doc = await super().find_one_async(req, **lookup)
         if doc and is_edit:
             prepare_for_edit_content_type(doc)
         if doc:
             clean_doc(doc)
         return doc
 
-    def set_used(self, profile_ids):
+    async def set_used(self, profile_ids):
         """Set `is_used` flag for content profiles.
 
         :param profile_ids
         """
         query = {"_id": {"$in": list(profile_ids)}, "is_used": {"$ne": True}}
         update = {"$set": {"is_used": True}}
-        self.find_and_modify(query=query, update=update)
+        await self.find_and_modify_async(query=query, update=update)
 
     def get_output_name(self, profile):
         try:
@@ -259,6 +263,8 @@ class ContentTypesService(CacheableService):
 def clean_doc(doc):
     schema = doc.get("schema", {})
     editor = doc.get("editor", {})
+
+    # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
     vocabularies = list(get_resource_service("vocabularies").get_forbiden_custom_vocabularies())
 
     for cv in HARDCODED_CVS:
@@ -297,6 +303,7 @@ def prepare_for_edit_content_type(doc):
 
 
 def init_extra_fields(editor, schema):
+    # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
     fields = get_resource_service("vocabularies").get_extra_fields()
     for field in fields:
         field_type = field.get("field_type")
@@ -321,6 +328,7 @@ def get_mandatory_list(schema):
 
 
 def get_fields_map_and_names():
+    # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
     vocabularies = get_resource_service("vocabularies").get_custom_vocabularies()
     fields_map = {}
     field_names = {}
@@ -596,10 +604,11 @@ def is_enabled(field, schema):
     return schema.get(field) or schema.get(field) == {} or field not in DEFAULT_SCHEMA or field in REQUIRED_FIELDS
 
 
-def apply_schema(item):
+def apply_schema(item: dict, profile: dict | None = None) -> dict:
     """Return item without fields that should not be there given it's profile.
 
     :param item: item to apply schema to
+    :param profile: ContentProfile to use for this item
     """
     # fields that can be added to article without being added to CP eg: using widgets
     allowed_keys = ["attachments", "refs", "place", "organisation", "person", "authors"]
@@ -609,24 +618,26 @@ def apply_schema(item):
 
     schema = DEFAULT_SCHEMA
     if item.get("profile"):
-        profile = get_profile(item["profile"])
+        if profile is None:
+            profile = get_profile(item["profile"])
         if profile and profile.get("schema"):
             schema = profile["schema"]
 
     return {key: val for key, val in item.items() if is_enabled(key, schema) or key in allowed_keys}
 
 
-def remove_profile_from_templates(item):
+async def remove_profile_from_templates(item):
     """Removes the profile data from templates that are using the profile
 
     :param item: deleted content profile
     """
-    templates = list(
-        superdesk.get_resource_service("content_templates").get_templates_by_profile_id(item.get(config.ID_FIELD))
+    templates = await superdesk.get_resource_service("content_templates").get_templates_by_profile_id(
+        item.get(ID_FIELD)
     )
+
     for template in templates:
         template.get("data", {}).pop("profile", None)
-        superdesk.get_resource_service("content_templates").patch(template[config.ID_FIELD], template)
+        await superdesk.get_resource_service("content_templates").patch_async(template[ID_FIELD], template)
 
 
 def get_profile(_id):

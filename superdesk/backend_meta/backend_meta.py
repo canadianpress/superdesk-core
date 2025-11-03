@@ -6,15 +6,16 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
+from typing import Optional, Dict, cast
 
 import os.path
 import re
 import json
 from pathlib import Path
-from typing import Optional, Dict
+
+from superdesk.core import get_app_config
 from superdesk.resource import Resource
 from superdesk.services import BaseService
-from superdesk import config
 
 try:
     import settings  # type: ignore
@@ -40,6 +41,8 @@ class BackendMetaResource(Resource):
     pass
 
 
+# Not upgrading to async, as local file I/O should not add much delay
+# and this endpoint is not used that often
 class BackendMetaService(BaseService):
     """Service givin metadata on backend itself"""
 
@@ -65,11 +68,8 @@ class BackendMetaService(BaseService):
 
         if config.REPO_OVERRIDE is set, it will be used
         """
-        try:
-            repo_override = config.REPO_OVERRIDE
-        except AttributeError:
-            # config may not be initialised (during tests or beginning of the session)
-            repo_override = {}
+
+        repo_override = cast(dict[str, str], get_app_config("REPO_OVERRIDE", {}))
         return GITHUB_COMMIT_HREF.format(package=repo_override.get(package, package), revision=revision)
 
     @classmethod

@@ -8,26 +8,40 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
+from typing import Dict, Any, Tuple
 import os
 import functools
 import logging
 import socket
-import unittest
 from pathlib import Path
+from dataclasses import dataclass
 
 from copy import deepcopy
-from base64 import b64encode
 from unittest.mock import patch
+from quart import Response, Quart
+from quart.testing import QuartClient
+from werkzeug.datastructures import Authorization
+from eve.events import Events
+import elasticsearch
+from pymongo import MongoClient
+from motor.motor_asyncio import AsyncIOMotorClient
+from elasticsearch import Elasticsearch, AsyncElasticsearch
 
-from flask import json, Config
-
+from .async_case import IsolatedAsyncioTestCase
+from superdesk.core import json
+from superdesk.flask import Config
 from apps.ldap import ADAuth
 from superdesk import get_resource_service
 from superdesk.cache import cache
 from superdesk.factory import get_app
-from superdesk.factory.app import get_media_storage_class
+from superdesk.factory.app import get_media_storage_class, SuperdeskApp
+from superdesk.core.app import SuperdeskAsyncApp
+from superdesk.core import app as core_app
+from superdesk.core.resources import ResourceModel
 from superdesk.storage.amazon_media_storage import AmazonMediaStorage
 from superdesk.storage.proxy import ProxyMediaStorage
+from superdesk.types import User, UsersResourceModel
+
 
 logger = logging.getLogger(__name__)
 test_user = {
@@ -59,7 +73,7 @@ def get_mongo_uri(key, dbname):
     return "/".join([env_host, dbname])
 
 
-def update_config(conf):
+def update_config(conf, auto_add_apps: bool = True, include_planning: bool = True):
     conf["ELASTICSEARCH_INDEX"] = "sptest"
     conf["MONGO_DBNAME"] = "sptests"
     conf["MONGO_URI"] = get_mongo_uri("MONGO_URI", "sptests")
@@ -75,7 +89,7 @@ def update_config(conf):
     conf["TESTING"] = True
     conf["SUPERDESK_TESTING"] = True
     conf["BCRYPT_GENSALT_WORK_FACTOR"] = 4
-    conf["CELERY_TASK_ALWAYS_EAGER"] = "True"
+    conf["CELERY_TASK_ALWAYS_EAGER"] = True
     conf["CELERY_BEAT_SCHEDULE_FILENAME"] = "./testschedule.db"
     conf["CELERY_BEAT_SCHEDULE"] = {}
     conf["CONTENT_EXPIRY_MINUTES"] = 99
@@ -94,7 +108,12 @@ def update_config(conf):
     conf["MACROS_MODULE"] = "superdesk.macros"
     conf["DEFAULT_TIMEZONE"] = "Europe/Prague"
     conf["LEGAL_ARCHIVE"] = True
-    conf["INSTALLED_APPS"].extend(["planning", "superdesk.macros.imperial", "apps.rundowns", "apps.user_availability"])
+    if auto_add_apps:
+        conf["INSTALLED_APPS"].extend(["superdesk.macros.imperial", "apps.rundowns", "apps.user_availability"])
+
+        if include_planning:
+            conf["INSTALLED_APPS"].append("planning")
+            conf["MODULES"].append("planning")
 
     # limit mongodb connections
     conf["MONGO_CONNECT"] = False
@@ -154,27 +173,27 @@ def foreach_mongo(fn):
     return inner
 
 
-def drop_mongo(app):
+async def drop_mongo(app):
     pairs = (
         ("MONGO", "MONGO_DBNAME"),
         ("ARCHIVED", "ARCHIVED_DBNAME"),
         ("LEGAL_ARCHIVE", "LEGAL_ARCHIVE_DBNAME"),
         ("CONTENTAPI_MONGO", "CONTENTAPI_MONGO_DBNAME"),
     )
-    with app.app_context():
+    async with app.app_context():
         for prefix, name in pairs:
             if not app.config.get(name):
                 continue
             dbname = app.config[name]
             dbconn = app.data.mongo.pymongo(prefix=prefix).cx
             dbconn.drop_database(dbname)
-            dbconn.close()
 
 
-def setup_config(config):
+def setup_config(config, auto_add_apps: bool = True):
     app_abspath = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
     app_config = Config(app_abspath)
     app_config.from_object("superdesk.default_settings")
+    app_config = deepcopy(app_config)
     cwd = Path.cwd()
     for p in [cwd] + list(cwd.parents):
         settings = p / "settings.py"
@@ -185,7 +204,7 @@ def setup_config(config):
     else:
         logger.warning("Can't find local settings")
 
-    update_config(app_config)
+    update_config(app_config, auto_add_apps)
 
     app_config.setdefault("INSTALLED_APPS", [])
 
@@ -231,9 +250,88 @@ def update_config_from_step(context, config):
             m.start()
 
 
-def clean_dbs(app, force=False):
-    _clean_es(app)
-    drop_mongo(app)
+async def clean_dbs(app=None, async_app: SuperdeskAsyncApp | None = None, force=False, init_indexes: bool = False):
+    if async_app is None:
+        if app is None:
+            raise RuntimeError("Async app not provided nor found")
+        async_app = app.async_app
+
+    if init_indexes:
+        if app:
+            await _clean_es(app)
+            await drop_mongo(app)
+
+        if async_app:
+            for resource_name, resource_config in async_app.mongo.get_all_resource_configs().items():
+                client, db = async_app.mongo.get_client(resource_name)
+                client.drop_database(db)
+            async_app.elastic.drop_indexes()
+
+        if app:
+            app.init_indexes()
+            await app.data.init_elastic(app)
+        elif async_app:
+            async_app.mongo.create_indexes_for_all_resources()
+            async_app.elastic.init_all_indexes()
+
+    else:
+        resources_processed: set[str] = set()
+
+        if app:
+            es = app.data.elastic
+            for resource in es._get_elastic_resources():
+                alias = es._resource_index(resource)
+                try:
+                    alias_info = es.elastic(resource).indices.get_alias(name=alias)
+                    for index in alias_info:
+                        es.elastic(resource).indices.refresh(index=index)
+                        es.elastic(resource).delete_by_query(
+                            index=index,
+                            body={"query": {"match_all": {}}},
+                            refresh=True,
+                        )
+                except elasticsearch.exceptions.NotFoundError:
+                    try:
+                        es.elastic(resource).indices.refresh(index=alias)
+                        es.elastic(resource).delete_by_query(
+                            index=alias,
+                            body={"query": {"match_all": {}}},
+                            refresh=True,
+                        )
+                    except elasticsearch.exceptions.NotFoundError:
+                        pass
+
+                # TODO-ASYNC: Figure out what's going on here, uncommenting this line causes
+                # some resources to not be wiped before running tests
+                # resources_processed.add(resource)
+
+            await drop_mongo(app)
+
+        if async_app:
+            for resource_config in async_app.resources.get_all_configs():
+                if resource_config.name in resources_processed:
+                    continue
+
+                mongo_client, mongo_db = async_app.mongo.get_client(resource_config.name)
+                mongo_client.drop_database(mongo_db)
+
+                if not resource_config.elastic:
+                    continue
+
+                try:
+                    es_client = async_app.elastic.get_client(resource_config.name)
+                    es_client.elastic.indices.refresh(index=es_client.config.index)
+                    es_client.elastic.delete_by_query(
+                        index=es_client.config.index,
+                        body={"query": {"match_all": {}}},
+                        refresh=True,
+                    )
+                except elasticsearch.exceptions.NotFoundError:
+                    print(f"ES Index not found for {resource_config.name}")
+                    pass
+
+        if app and getattr(cache, "app", None):
+            cache.clean()
 
 
 def retry(exc, count=1):
@@ -257,13 +355,13 @@ def retry(exc, count=1):
     return wrapper
 
 
-def _clean_es(app):
-    with app.app_context():
+async def _clean_es(app):
+    async with app.app_context():
         app.data.elastic.drop_index()
 
 
 @retry(socket.timeout, 2)
-def clean_es(app, force=False):
+async def clean_es(app, force=False):
     use_snapshot(app, "clean", [snapshot_es], force)(_clean_es)(app)
 
 
@@ -355,42 +453,123 @@ def use_snapshot(app, name, funcs=(snapshot_es, snapshot_mongo), force=False):
 use_snapshot.cache = {}  # type: ignore
 
 
-def setup(context=None, config=None, app_factory=get_app, reset=False):
-    if not hasattr(setup, "app") or setup.reset or config:
-        cfg = setup_config(config)
-        setup.app = app_factory(cfg)
-        setup.reset = reset
-    app = setup.app
+def _close_db_connection(con: MongoClient | AsyncIOMotorClient | Elasticsearch):
+    con.close()
+
+
+async def _close_async_db_connection(con: AsyncElasticsearch):
+    await con.close()
+
+
+async def cleanup_db_connections(current_app):
+    # Close all connections the MongoDB and Elasticsearch and clear app extension dicts
+
+    previous_app = getattr(setup, "app", None)
+    if not previous_app:
+        return
+
+    async with previous_app.app_context():
+        for mongo_con in previous_app.data.mongo.driver.values():
+            _close_db_connection(mongo_con.cx)
+
+        for mongo_con in previous_app.data.mongo_async.driver.values():
+            _close_db_connection(mongo_con.cx)
+
+        _close_db_connection(previous_app.data.elastic.es)
+        for es_con in previous_app.data.elastic.elastics.values():
+            _close_db_connection(es_con)
+
+        await _close_async_db_connection(previous_app.data.elastic_async.es_async)
+        for es_async_con in previous_app.data.elastic_async.elastics.values():
+            await _close_async_db_connection(es_async_con)
+
+    current_app.extensions["pymongo"] = {}
+    current_app.extensions["pymongo_async"] = {}
+
+
+async def cleanup_async_db_connections(current_app):
+    # Close all async connections the MongoDB and Elasticsearch and clear app extension dicts
+
+    previous_app = getattr(setup, "app", None)
+    if not previous_app:
+        return
+
+    for mongo_con in previous_app.async_app.mongo._mongo_clients.values():
+        _close_db_connection(mongo_con[0])
+
+    for mongo_con in previous_app.async_app.mongo._mongo_clients_async.values():
+        _close_db_connection(mongo_con[0])
+
+    for es_con in previous_app.async_app.elastic._elastic_connections.values():
+        _close_db_connection(es_con)
+
+    for es_async_con in previous_app.async_app.elastic._elastic_async_connections.values():
+        await _close_async_db_connection(es_async_con)
+
+
+async def setup(context=None, config=None, app_factory=get_app, reset=False, auto_add_apps: bool = True):
+    previous_app = getattr(setup, "app", None)
+
+    if not previous_app or hasattr(setup, "reset") or config:  # type: ignore[attr-defined]
+        cfg = setup_config(config, auto_add_apps)
+        app = app_factory(cfg)  # type: ignore[attr-defined]
+
+        await cleanup_db_connections(app)
+        await cleanup_async_db_connections(app.async_app)
+
+        setup.app = app  # type: ignore[attr-defined]
+        setup.async_app = setup.app.async_app  # type: ignore[attr-defined]
+        setup.reset = reset  # type: ignore[attr-defined]
+    app = setup.app  # type: ignore[attr-defined]
 
     if context:
         context.app = app
+        app.test_client_class = TestClient
         context.client = app.test_client()
-        if not hasattr(context, "BEHAVE") and not hasattr(context, "test_context") and hasattr(context, "addCleanup"):
-            context.test_context = app.test_request_context()
-            context.test_context.push()
-            context.addCleanup(context.test_context.pop)
 
-    with app.app_context():
-        clean_dbs(app, force=bool(config))
-        app.data.elastic.init_index()
-        app.init_indexes()
-        cache.clean()
+        if not hasattr(context, "BEHAVE") and not hasattr(context, "test_context"):
+            context.test_context = app.test_request_context("/")
+            await context.test_context.push()
+
+    async with app.app_context():
+        await clean_dbs(app, init_indexes=True)
 
     return app
 
 
-def setup_auth_user(context, user=None):
-    setup_db_user(context, user)
+async def setup_auth_user(context, user=None):
+    await setup_db_user(context, user)
 
 
-def add_to_context(context, token, user, auth_id=None):
-    context.headers.append(("Authorization", b"basic " + b64encode(token + b":")))
+def token_to_basic_auth_header(token: str) -> Tuple[str, str]:
+    """
+    Use werkzeug's Authorization to create a valid basic auth token. This way we don't
+    need to know how quart/werkzeug handles it convertion to string internally
+    """
+    basic_auth = Authorization("basic", data=dict(username=token, password=""))
+    return ("Authorization", basic_auth.to_header())  # type: ignore[attr-defined]
+
+
+def add_user_info_to_context(context: Any, token: str, user: User, auth_id=None):
+    """
+    Add current user's session information to context headers.
+    It converts the plain string token into a valid basic auth token that
+    will be converted back to string (internal) by quart/werkzeug Request.
+    """
+    basic_token_header = token_to_basic_auth_header(token)
+
+    # remove any existing authorization header. Updates the list (in-place)
+    # to preserve any references to context.headers elsewhere
+    context.headers[:] = [h for h in context.headers if h[0] != "Authorization"]
+    context.headers.append(basic_token_header)
+
     if getattr(context, "user", None):
         context.previous_user = context.user
     context.user = user
-    set_placeholder(context, "CONTEXT_USER_ID", str(user.get("_id")))
+
+    set_placeholder(context, "CONTEXT_USER_ID", str(user.get("_id", "")))
     set_placeholder(context, "AUTH_ID", str(auth_id))
-    set_placeholder(context, f"{user.get('username').upper()}_USER_ID", str(user.get("_id")))
+    set_placeholder(context, f"{user.get('username', '').upper()}_USER_ID", str(user.get("_id")))
 
 
 def set_placeholder(context, name, value):
@@ -411,34 +590,41 @@ def get_prefixed_url(current_app, endpoint):
     return url_prefix + endpoint
 
 
-def setup_db_user(context, user):
+async def setup_db_user(context, user):
     """Setup the user for the DB authentication.
 
     :param context: test context
     :param dict user: user
     """
     user = user or test_user
-    with context.app.test_request_context(context.app.config["URL_PREFIX"]):
+    async with context.app.test_request_context(context.app.config["URL_PREFIX"]):
         original_password = user["password"]
 
         user.setdefault("user_type", "administrator")
 
-        if not get_resource_service("users").find_one(username=user["username"], req=None):
-            get_resource_service("users").post([user])
+        users_service = UsersResourceModel.get_service()
+        if not await users_service.count({"username": user["username"]}):
+            await users_service.create([user])
 
         user["password"] = original_password
         auth_data = json.dumps({"username": user["username"], "password": user["password"]})
-        auth_response = context.client.post(
-            get_prefixed_url(context.app, "/auth_db"), data=auth_data, headers=context.headers
+
+        auth_request_headers = deepcopy(context.headers)
+        auth_request_headers.append(["Content-Type", "application/json"])
+
+        auth_response = await context.client.post(
+            get_prefixed_url(context.app, "/auth_db"),
+            data=auth_data,
+            headers=auth_request_headers,
         )
 
-        auth_data = json.loads(auth_response.get_data())
-        token = auth_data.get("token").encode("ascii")
+        auth_data = json.loads(await auth_response.get_data())
+        token = auth_data.get("token")
         auth_id = auth_data.get("_id")
-        add_to_context(context, token, user, auth_id)
+        add_user_info_to_context(context, token, user, auth_id)
 
 
-def setup_ad_user(context, user):
+async def setup_ad_user(context, user):
     """Setup the AD user for the LDAP authentication.
 
     The method patches the authenticate_and_fetch_profile method of the ADAuth class
@@ -475,14 +661,14 @@ def setup_ad_user(context, user):
 
     with patch.object(ADAuth, "authenticate_and_fetch_profile", return_value=ad_profile):
         auth_data = json.dumps({"username": ad_user["username"], "password": ad_user["password"]})
-        auth_response = context.client.post(
+        auth_response = await context.client.post(
             get_prefixed_url(context.app, "/auth_db"), data=auth_data, headers=context.headers
         )
-        auth_response_as_json = json.loads(auth_response.get_data())
+        auth_response_as_json = json.loads(await auth_response.get_data())
         token = auth_response_as_json.get("token").encode("ascii")
         ad_user["_id"] = auth_response_as_json["user"]
 
-        add_to_context(context, token, ad_user)
+        add_user_info_to_context(context, token, ad_user)
 
 
 class NotificationMock:
@@ -509,64 +695,173 @@ def teardown_notification(context):
     context.app.notification_client = context.app.notification_client.client
 
 
-class TestCase(unittest.TestCase):
-    def __init__(self, *a, **kw):
-        super().__init__(*a, **kw)
+@dataclass
+class MockWSGI(Events):
+    config: Dict[str, Any]
 
-        self.app = None
-        self.client = None
-        self.ctx = None
+    def add_url_rule(self, *args, **kwargs):
+        pass
+
+    def register_endpoint(self, endpoint):
+        pass
+
+    def as_any(self):
+        return self
+
+
+class AsyncTestCase(IsolatedAsyncioTestCase):
+    app: SuperdeskAsyncApp
+    app_config: Dict[str, Any] = {}
+    autorun: bool = True
 
     @classmethod
-    def setUpClass(cls):
-        """Wrap `setUp` and `tearDown` methods to run `setUpForChildren` and `tearDownForChildren`."""
+    async def asyncSetUpClass(cls):
+        app_config = setup_config(deepcopy(cls.app_config), False)
+        cls.app = SuperdeskAsyncApp(MockWSGI(config=app_config))
+        await cleanup_async_db_connections(cls.app)
+        setattr(setup, "async_app", cls.app)
+        await cls.resetDatabase(True)
+        cls.app.start()
 
-        # setUp
-        def wrapper(self, *args, **kwargs):
-            """Combine `setUp` with `setUpForChildren`."""
-            self.setUpForChildren()
-            return orig_setup(self, *args, **kwargs)
+    @classmethod
+    async def resetDatabase(cls, init_indexes: bool = False):
+        await clean_dbs(app=None, async_app=cls.app, init_indexes=init_indexes)
 
-        orig_setup = cls.setUp
-        cls.setUp = wrapper
+    def startApp(self):
+        self.app.start()
 
-        # tearDown
-        def wrapper(self, *args, **kwargs):
-            """Combine `tearDown` with `tearDownForChildren`."""
-            self.tearDownForChildren()
-            return orig_teardown(self, *args, **kwargs)
+    async def asyncSetUp(self):
+        if not self.autorun:
+            return
 
-        orig_teardown = cls.tearDown
-        cls.tearDown = wrapper
-
-    def setUpForChildren(self):
-        """Run this `setUp` stuff for each children."""
-        setup(self, reset=True)
-
-        self.ctx = self.app.app_context()
-        self.ctx.push()
-        self.addCleanup(self.ctx.pop)
-
-    def tearDownForChildren(self):
-        """Run this `tearDown` stuff for each children."""
+        await self.resetDatabase()
 
     def get_fixture_path(self, filename):
         rootpath = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
         return os.path.join(rootpath, "features", "steps", "fixtures", filename)
 
+    def assertDictContains(self, source: dict, contains: dict):
+        self.assertDictEqual({key: val for key, val in source.items() if key in contains}, contains)
 
-class AppTestCase(unittest.TestCase):
-    config = {}
 
-    def setUp(self):
-        super().setUp()
-        config = setup_config(self.config)
-        self.app = get_app(config)
+class AsyncQuartTestCase(IsolatedAsyncioTestCase):
+    """Asyncio TestCase where a Quart instance is needed and not the full Superdesk app"""
+
+    app: Quart
+    app_config: dict | None = None
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.app = Quart(__name__)
+        if self.app_config:
+            self.app.config.update(deepcopy(self.app_config))
+
+        original_app = None
+        if core_app._global_app is not None:
+            original_app = getattr(core_app._global_app, "wsgi", None)
+            core_app._global_app.wsgi = self.app
+
         self.ctx = self.app.app_context()
-        self.ctx.push()
-        self.addCleanup(self.ctx.pop)
-        cache.clean()
+        await self.ctx.push()
 
-    def resetDatabase(self):
-        clean_dbs(self.app)
-        self.app.data.elastic.init_index()
+        async def clean_ctx():
+            if original_app:
+                core_app._global_app.wsgi = original_app
+
+            if self.ctx:
+                try:
+                    await self.ctx.pop()
+                except Exception:
+                    pass
+
+        self.addAsyncCleanup(clean_ctx)
+
+
+class TestClient(QuartClient):
+    async def open(self, *args, **kwargs) -> Response:
+        """
+        Appends the request path to the response object for later debugging
+        """
+
+        response = await super().open(*args, **kwargs)
+        response.request_path = kwargs.get("path", args[0] if args else "/")  # type: ignore[attr-defined]
+        return response
+
+    def model_instance_to_json(self, model_instance: ResourceModel):
+        return model_instance.to_dict(mode="json")
+
+    async def post(self, *args, **kwargs) -> Response:
+        if "json" in kwargs:
+            if isinstance(kwargs["json"], ResourceModel):
+                kwargs["json"] = self.model_instance_to_json(kwargs["json"])
+            elif isinstance(kwargs["json"], list):
+                kwargs["json"] = [
+                    self.model_instance_to_json(item) if isinstance(item, ResourceModel) else item
+                    for item in kwargs["json"]
+                ]
+            elif isinstance(kwargs["json"], dict):
+                kwargs["json"] = {
+                    key: self.model_instance_to_json(value) if isinstance(value, ResourceModel) else value
+                    for key, value in kwargs["json"].items()
+                }
+
+        return await super().post(*args, **kwargs)
+
+
+class AsyncFlaskTestCase(AsyncTestCase):
+    async_app: SuperdeskAsyncApp
+    app: SuperdeskApp
+    use_default_apps: bool = False
+    test_client: TestClient
+    clean_reset_db: bool = True
+    _config_backup: dict = {}
+
+    @classmethod
+    async def asyncSetUpClass(cls):
+        """Hook method for setting up class fixture before running tests in the class."""
+        config = deepcopy(cls.app_config)
+
+        if cls.use_default_apps:
+            await setup(cls, config=config, reset=True, auto_add_apps=True)
+        else:
+            config.setdefault("CORE_APPS", [])
+            config.setdefault("INSTALLED_APPS", [])
+            await setup(cls, config=config, reset=True, auto_add_apps=False)
+        cls.async_app = cls.app.async_app
+        cls.app.test_client_class = TestClient
+        cls.test_client = cls.app.test_client()
+        cls._config_backup = deepcopy(cls.app.config)
+
+    async def asyncSetUp(self):
+        # Make sure to reset the config for each scenario, based on the config
+        # created in the feature setup
+        if self._config_backup:
+            # Make sure to keep original ``DOMAIN`` config from Eve
+            domain_config = self.app.config["DOMAIN"]
+            self.app.config = deepcopy(self._config_backup)
+            self.app.config["DOMAIN"] = domain_config
+
+        self.ctx = self.app.app_context()
+        await self.ctx.push()
+        await clean_dbs(self.app, init_indexes=self.clean_reset_db)
+
+        async def clean_ctx():
+            if self.ctx:
+                try:
+                    await self.ctx.pop()
+                except Exception:
+                    pass
+
+        self.addAsyncCleanup(clean_ctx)
+
+    async def get_resource_etag(self, resource: str, item_id: str):
+        return (await (await self.test_client.get(f"/api/{resource}/{item_id}")).get_json())["_etag"]
+
+    @classmethod
+    async def resetDatabase(cls, init_indexes: bool = False):
+        await clean_dbs(cls.app, init_indexes=False)
+
+
+class TestCase(AsyncFlaskTestCase):
+    use_default_apps: bool = True
+    clean_reset_db: bool = False

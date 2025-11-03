@@ -9,16 +9,24 @@
 # at https://www.sourcefabric.org/superdesk/license
 
 import logging
-from flask import current_app as app
+
+import click
+
+from superdesk.core import get_app_config
+from superdesk.commands import cli
 from superdesk.errors import SuperdeskApiError
 import superdesk
 from .ldap import ADAuth, add_default_values, get_user_query
-from flask_babel import _
 
 logger = logging.getLogger(__name__)
 
 
-class ImportUserProfileFromADCommand(superdesk.Command):
+@cli.command("users:copyfromad")
+@click.option("--ad_username", "-adu", required=True)
+@click.option("--ad_password", "-adp", required=True)
+@click.option("--username_to_import", "-u", "username", required=True)
+@click.option("--admin", "-a", required=False)
+async def cli_users_copyfromad(ad_username, ad_password, username, admin):
     """Responsible for importing a user profile from Active Directory (AD) to Mongo.
 
     This command runs on assumption that the user executing this command and
@@ -32,14 +40,11 @@ class ImportUserProfileFromADCommand(superdesk.Command):
 
     """
 
-    option_list = (
-        superdesk.Option("--ad_username", "-adu", dest="ad_username", required=True),
-        superdesk.Option("--ad_password", "-adp", dest="ad_password", required=True),
-        superdesk.Option("--username_to_import", "-u", dest="username", required=True),
-        superdesk.Option("--admin", "-a", dest="admin", required=False),
-    )
+    await ImportUserProfileFromADCommand().run(ad_username, ad_password, username, admin)
 
-    def run(self, ad_username, ad_password, username, admin="false"):
+
+class ImportUserProfileFromADCommand:
+    async def run(self, ad_username, ad_password, username, admin="false"):
         """Imports or Updates a User Profile from AD to Mongo.
 
         :param ad_username: Active Directory Username
@@ -52,31 +57,30 @@ class ImportUserProfileFromADCommand(superdesk.Command):
         user_type = "administrator" if admin is not None and admin.lower() == "true" else "user"
 
         # Authenticate and fetch profile from AD
-        settings = app.settings
         ad_auth = ADAuth(
-            settings["LDAP_SERVER"],
-            settings["LDAP_SERVER_PORT"],
-            settings["LDAP_BASE_FILTER"],
-            settings["LDAP_USER_FILTER"],
-            settings["LDAP_USER_ATTRIBUTES"],
-            settings["LDAP_FQDN"],
+            get_app_config("LDAP_SERVER"),
+            get_app_config("LDAP_SERVER_PORT"),
+            get_app_config("LDAP_BASE_FILTER"),
+            get_app_config("LDAP_USER_FILTER"),
+            get_app_config("LDAP_USER_ATTRIBUTES"),
+            get_app_config("LDAP_FQDN"),
         )
 
         user_data = ad_auth.authenticate_and_fetch_profile(ad_username, ad_password, username)
+        print(user_data)
 
         if len(user_data) == 0:
             raise SuperdeskApiError.notFoundError("Username not found")
 
         # Check if User Profile already exists in Mongo
-        user = superdesk.get_resource_service("users").find_one(req=None, **get_user_query(username))
+        users_service = superdesk.get_resource_service("users")
+        user = await users_service.find_one_async(req=None, **get_user_query(username))
 
         if user:
-            superdesk.get_resource_service("users").patch(user.get("_id"), user_data)
+            await users_service.patch_async(user.get("_id"), user_data)
         else:
             add_default_values(user_data, username, user_type=user_type)
-            superdesk.get_resource_service("users").post([user_data])
+            await users_service.post_async([user_data])
 
+        print(user_data)
         return user_data
-
-
-superdesk.command("users:copyfromad", ImportUserProfileFromADCommand())

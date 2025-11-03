@@ -15,6 +15,8 @@ The meaning of configuration options is described in the Eve framework
 `documentation <http://python-eve.org/config.html#global-configuration>`_.
 """
 
+from importlib.util import find_spec
+
 from superdesk.default_settings import env, urlparse, strtobool
 
 from superdesk.default_settings import (  # noqa
@@ -41,6 +43,11 @@ from superdesk.default_settings import (  # noqa
     DEBUG,
     URN_DOMAIN,
     PROXY_MEDIA_STORAGE_CHECK_EXISTS,
+    ASYNC_ENABLE_CORS,
+    PUBLISH_EXCHANGE_FACTORY,
+    AUTH_SERVER_SHARED_SECRET,
+    AUTH_SERVER_EXPIRATION_DELAY,
+    DEFAULT_GENRE_VALUE_FOR_MANUAL_ARTICLES,
 )
 
 CONTENTAPI_INSTALLED_APPS = [
@@ -52,6 +59,18 @@ CONTENTAPI_INSTALLED_APPS = [
     "content_api.packages_versions",
     "content_api.api_audit",
 ]
+
+CONTENT_API_MODULES = ["content_api.items.module", "content_api.auth"]
+
+# If the Planning module is installed, then include it by default
+# Can be overridden in the local ``settings.py`` file
+# Note: Uses ``find_spec`` so we're not importing the module here
+if find_spec("planning") is not None:
+    CONTENT_API_MODULES.append("planning.content_api")
+
+PUBLISH_MODULES = []
+
+ASYNC_AUTH_CLASS = "content_api.tokens.auth:SubscriberTokenAuth"
 
 CONTENTAPI_DOMAIN = {}
 

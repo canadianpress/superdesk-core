@@ -17,7 +17,8 @@ import logging
 import superdesk
 
 from typing import Callable, List, Tuple
-from flask import Blueprint, current_app as app
+from superdesk.core import get_app_config, get_current_app
+from superdesk.flask import Blueprint
 
 
 bp = Blueprint("system", __name__)
@@ -25,23 +26,23 @@ logger = logging.getLogger(__name__)
 
 
 def mongo_health() -> bool:
-    info = app.data.mongo.pymongo().cx.server_info()
+    info = get_current_app().data.mongo.pymongo().cx.server_info()
     return bool(info["ok"])
 
 
 def elastic_health() -> bool:
-    health = app.data.elastic.es.cluster.health()
+    health = get_current_app().data.elastic.es.cluster.health()
     return health["status"] in ("green", "yellow")
 
 
 def celery_health() -> bool:
-    with app.celery.connection_for_write() as conn:
+    with get_current_app().celery.connection_for_write() as conn:
         conn.connect()
         return conn.connected
 
 
 def redis_health() -> bool:
-    info = app.redis.info()
+    info = get_current_app().redis.info()
     return bool(info)
 
 
@@ -57,10 +58,17 @@ checks: List[Tuple[str, Callable[[], bool]]] = [
 ]
 
 
-@bp.route("/system/health", methods=["GET", "OPTIONS"])
-def health():
+def get_health_status(app_name: str) -> dict[str, str]:
+    """Get health status for all configured checks.
+
+    Args:
+        app_name: Name of the application
+
+    Returns:
+        Dictionary containing health status for each component and overall status
+    """
     output = {
-        "application_name": app.config.get("APPLICATION_NAME"),
+        "application_name": app_name,
     }
 
     status = True
@@ -75,6 +83,11 @@ def health():
 
     output["status"] = human(status)
     return output
+
+
+@bp.route("/system/health", methods=["GET", "OPTIONS"])
+def health():
+    return get_health_status(get_app_config("APPLICATION_NAME"))
 
 
 def init_app(app) -> None:

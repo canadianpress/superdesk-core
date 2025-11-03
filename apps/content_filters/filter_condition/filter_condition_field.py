@@ -11,13 +11,14 @@
 from typing import Dict
 from enum import Enum
 from lxml import etree
-from flask import g
+
+from superdesk.flask import g
 from superdesk.text_utils import get_text
 from superdesk.utc import utcnow
 from superdesk import get_resource_service
 from superdesk.errors import SuperdeskApiError
 from superdesk.cache import cache
-from flask_babel import _
+from quart_babel import gettext as _
 
 
 class FilterConditionFieldsEnum(Enum):
@@ -47,6 +48,7 @@ class FilterConditionFieldsEnum(Enum):
 @cache(ttl=3600, tags=("vocabularies",))
 def _get_field_type_map() -> Dict[str, str]:
     field_type_map = {}
+    # TODO-ASYNC[vocabularies]: Use VocabulariesService async service where when upgrading this module
     cvs = get_resource_service("vocabularies").get_from_mongo(req=None, lookup=None, projection={"field_type": 1})
     for cv in cvs:
         field_type_map[cv["_id"]] = cv.get("field_type", "")
@@ -55,8 +57,8 @@ def _get_field_type_map() -> Dict[str, str]:
 
 def get_field_type_map() -> Dict[str, str]:
     if not hasattr(g, "field_type_map"):
-        g.field_type_map = _get_field_type_map()
-    return g.field_type_map
+        g.field_type_map = _get_field_type_map()  # type: ignore
+    return g.field_type_map  # type: ignore
 
 
 class FilterConditionField:

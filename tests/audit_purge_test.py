@@ -6,7 +6,7 @@ from superdesk import get_resource_service
 
 
 class AuditTestCase(TestCase):
-    def testAuditPurge(self):
+    async def testAuditPurge(self):
         now = datetime.utcnow()
         self.app.data.insert("archive", [{"_id": 2}])
         self.app.data.insert(
@@ -29,5 +29,5 @@ class AuditTestCase(TestCase):
             ],
         )
         self.app.config["AUDIT_EXPIRY_MINUTES"] = 5
-        PurgeAudit().run()
+        await PurgeAudit().run()
         self.assertEqual(get_resource_service("audit").find({}).count(), 1)

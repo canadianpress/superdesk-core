@@ -10,6 +10,7 @@
 
 import re
 import logging
+from inspect import isawaitable
 
 # from superdesk.errors import SuperdeskApiError
 import superdesk
@@ -32,11 +33,11 @@ class Default(SpellcheckerBase):
     capacities = (CAP_SPELLING,)
     languages = [LANG_ANY]
 
-    def check(self, text, language=None):
+    async def check(self, text, language=None):
         if language is None:
             raise SuperdeskApiError.badRequestError("missing language for default spellchecker")
         dictionaries_service = superdesk.get_resource_service("dictionaries")
-        model = dictionaries_service.get_model_for_lang(language)
+        model = await dictionaries_service.get_model_for_lang(language)
         err_list = []
         check_data = {"errors": err_list}
         for match in re.finditer(r"([^\d\W]+-?)+", text):
@@ -50,11 +51,11 @@ class Default(SpellcheckerBase):
                 err_list.append(ercorr_data)
         return check_data
 
-    def suggest(self, text, language=None):
+    async def suggest(self, text, language=None):
         if language is None:
             raise SuperdeskApiError.badRequestError("missing language for default spellchecker")
         spellcheck_service = superdesk.get_resource_service("spellcheck")
-        suggestions = spellcheck_service.suggest(text, language)
+        suggestions = await spellcheck_service.suggest(text, language)
         return {"suggestions": self.list2suggestions(suggestions)}
 
 

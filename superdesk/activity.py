@@ -10,21 +10,22 @@
 
 import datetime
 import logging
-from typing import List
+from typing import List, cast
 
 from bson.objectid import ObjectId
-from flask import g
-from flask_babel import _, lazy_gettext
+from quart_babel import lazy_gettext
 
 import superdesk
 from superdesk import get_resource_service
+from superdesk.core import get_current_app
 from superdesk.emails import send_activity_emails
 from superdesk.errors import SuperdeskApiError, add_notifier
+from superdesk.eve_async.service import AsyncBaseService
 from superdesk.notification import push_notification
 from superdesk.preferences import get_user_notification_preferences
 from superdesk.resource import Resource
-from superdesk.services import BaseService
-from superdesk.types import User
+from superdesk.eve_async import AsyncBaseService
+from superdesk.types import User, UsersResourceModel, UserTypeEnum
 from superdesk.utc import utcnow
 from eve.utils import ParsedRequest
 from superdesk.metadata.item import PUBLISH_STATES
@@ -103,12 +104,12 @@ class ActivityResource(Resource):
     )
 
 
-class ActivityService(BaseService):
-    def get(self, req, lookup):
+class ActivityService(AsyncBaseService):
+    async def get_async(self, req, lookup):
         """Filter out personal activity on personal items if inquired by another user."""
         if req is None:
             req = ParsedRequest()
-        user = getattr(g, "user", None)
+        user = get_current_app().get_current_user_dict()
         if not user:
             raise SuperdeskApiError.notFoundError("Can not determine user")
         where_cond = {}
@@ -122,16 +123,16 @@ class ActivityService(BaseService):
             where_cond["$or"] = [where_item, {"resource": {"$ne": "archive"}}]
             req.where = json.dumps(where_cond)
 
-        return self.backend.get(self.datasource, req=req, lookup=lookup)
+        return await super().get_async(req, lookup)
 
-    def on_update(self, updates, original):
+    async def on_update_async(self, updates, original):
         """Called on the patch request to mark a activity/notification/comment as read and nothing else
 
         :param updates:
         :param original:
         :return:
         """
-        user = getattr(g, "user", None)
+        user = get_current_app().get_current_user_dict()
         if not user:
             raise SuperdeskApiError.notFoundError("Can not determine user")
         user_id = user.get("_id")
@@ -174,7 +175,7 @@ ACTIVITY_EVENT = "event"
 ACTIVITY_ERROR = "error"
 
 
-def add_activity(
+async def add_activity(
     activity_name, msg, resource=None, item=None, notify=None, notify_desks=None, can_push_notification=True, **data
 ):
     """
@@ -205,7 +206,7 @@ def add_activity(
 
     activity = {"name": activity_name, "message": msg, "data": data, "resource": resource}
 
-    user = getattr(g, "user", None)
+    user = get_current_app().get_current_user_dict()
     if user:
         activity["user"] = user.get("_id")
         activity["user_name"] = user.get("display_name", user.get("username"))
@@ -231,7 +232,7 @@ def add_activity(
         if item.get("task") and item["task"].get("desk"):
             activity["desk"] = ObjectId(item["task"]["desk"])
 
-    get_resource_service(ActivityResource.endpoint_name).post([activity])
+    await get_resource_service(ActivityResource.endpoint_name).post_async([activity])
 
     if can_push_notification:
         push_notification(ActivityResource.endpoint_name, _dest=activity["recipients"], activity=activity)
@@ -239,7 +240,7 @@ def add_activity(
     return activity
 
 
-def notify_and_add_activity(
+async def notify_and_add_activity(
     activity_name, msg, resource=None, item=None, user_list=None, notification_name=None, **data
 ):
     """
@@ -257,7 +258,7 @@ def notify_and_add_activity(
         if get_user_notification_preferences(user, notification_name)["desktop"]
     ]
 
-    add_activity(
+    await add_activity(
         activity_name,
         msg=msg,
         resource=resource,
@@ -268,12 +269,12 @@ def notify_and_add_activity(
 
     if activity_name == ACTIVITY_ERROR or user_list:
         if not user_list:
-            user_list = get_resource_service("users").get_users_by_user_type("administrator")
+            user_list = await UsersResourceModel.get_by_user_type(UserTypeEnum.ADMINISTRATOR)
 
         recipients = get_recipients(user_list, notification_name)
 
         if activity_name != ACTIVITY_ERROR:
-            current_user = getattr(g, "user", None)
+            current_user = get_current_app().get_current_user_dict()
             activity = {
                 "name": activity_name,
                 "message": current_user.get("display_name") + " " + msg if current_user else msg,
@@ -284,7 +285,7 @@ def notify_and_add_activity(
             activity = {"name": activity_name, "message": "System " + msg, "data": data, "resource": resource}
 
         if recipients:
-            send_activity_emails(activity=activity, recipients=recipients)
+            await send_activity_emails(activity=activity, recipients=recipients)
 
 
 def get_recipients(user_list: List[User], notification_name=None) -> List[str]:

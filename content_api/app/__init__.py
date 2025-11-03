@@ -19,17 +19,17 @@ thus essentially just a normal `Flask <http://flask.pocoo.org/>`_ application.
 """
 
 import os
-import flask
 import importlib
 
 from eve.io.mongo.mongo import MongoJSONEncoder
 
-from content_api.tokens import SubscriberTokenAuth
+from superdesk.flask import Config
+from content_api.tokens.auth import LegacyTokenAuth
 from superdesk.datalayer import SuperdeskDataLayer
 from superdesk.factory.elastic_apm import setup_apm
 from superdesk.validator import SuperdeskValidator
 from superdesk.factory.app import SuperdeskEve, set_error_handlers, get_media_storage_class
-from superdesk.factory.sentry import SuperdeskSentry
+from superdesk.cache import cache_backend
 
 
 def get_app(config=None):
@@ -40,10 +40,13 @@ def get_app(config=None):
         from `settings.py`
     :return: a new SuperdeskEve app instance
     """
-    app_config = flask.Config(".")
+    app_config = Config(".")
 
     # get content api default conf
     app_config.from_object("content_api.app.settings")
+
+    if "planning.content_api" in app_config.get("CONTENT_API_MODULES", []):
+        app_config.from_object("planning.content_api.settings")
 
     # set some required fields
     app_config.update({"DOMAIN": {"upload": {}}, "SOURCES": {}})
@@ -64,7 +67,7 @@ def get_app(config=None):
     media_storage = get_media_storage_class(app_config)
 
     app = SuperdeskEve(
-        auth=SubscriberTokenAuth,
+        auth=LegacyTokenAuth,
         settings=app_config,
         data=SuperdeskDataLayer,
         media=media_storage,
@@ -74,6 +77,7 @@ def get_app(config=None):
 
     set_error_handlers(app)
     setup_apm(app, "Content API")
+    cache_backend.init_app(app)
 
     for module_name in app.config.get("CONTENTAPI_INSTALLED_APPS", []):
         app_module = importlib.import_module(module_name)
@@ -82,7 +86,9 @@ def get_app(config=None):
         except AttributeError:
             pass
 
-    app.sentry = SuperdeskSentry(app)
+    app.config["MODULES"] = app_config["CONTENT_API_MODULES"]
+
+    app.async_app.start()
 
     return app
 

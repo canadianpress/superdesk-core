@@ -8,13 +8,14 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
+from superdesk.core import get_current_app
 from superdesk.activity import add_activity
 from eve.utils import ParsedRequest
-from flask import g
 from superdesk.emails import send_user_mentioned_email
 import re
 import superdesk
 from superdesk.notification import push_notification
+from superdesk.types import DesksResourceModel, UsersResourceModel
 
 
 def get_mentions(text):
@@ -32,41 +33,42 @@ def get_mentions(text):
     return user_names, desk_names
 
 
-def send_email_to_mentioned_users(doc, mentioned_users, origin):
+async def send_email_to_mentioned_users(doc, mentioned_users, origin):
     prefs_service = superdesk.get_resource_service("preferences")
     recipients = []
+    users_service = UsersResourceModel.get_service()
     for user in mentioned_users:
-        send_email = prefs_service.email_notification_is_enabled(user_id=user)
+        send_email = await prefs_service.email_notification_is_enabled_async(user_id=user)
         if send_email:
-            user_doc = superdesk.get_resource_service("users").find_one(req=None, _id=user)
-            recipients.append(user_doc["email"])
+            user_doc = await users_service.find_by_id(user)
+            recipients.append(user_doc.email)
     if recipients:
-        username = g.user.get("display_name") or g.user.get("username")
+        user = get_current_app().get_current_user_dict() or {}
+        username = user.get("display_name") or user.get("username")
         url = "{}/#/workspace?item={}&action=edit&comments={}".format(origin, doc["item"], doc["_id"])
-        send_user_mentioned_email(recipients, username, doc, url)
+        await send_user_mentioned_email(recipients, username, doc, url)
 
 
 def get_users(user_names):
     req = ParsedRequest()
+    # TODO-ASYNC[users]: Upgrade to async when updating this module
     users = superdesk.get_resource_service("users").get(req=req, lookup={"username": {"$in": user_names}})
     users = {user.get("username"): user.get("_id") for user in users}
     return users
 
 
-def get_desks(desk_names):
-    req = ParsedRequest()
-    desks = superdesk.get_resource_service("desks").get(req=req, lookup={"name": {"$in": desk_names}})
-    desks = {desk.get("name"): desk.get("_id") for desk in desks}
-    return desks
+async def get_desks(desk_names):
+    cursor = await DesksResourceModel.get_service().search({"name": {"$in": desk_names}})
+    return {desk.name: desk.id async for desk in cursor}
 
 
-def notify_mentioned_users(docs, origin, item=None):
+async def notify_mentioned_users(docs, origin, item=None):
     for doc in docs:
         mentioned_users = doc.get("mentioned_users", {}).values()
         if len(mentioned_users) > 0:
             if not item:
                 item = superdesk.get_resource_service("archive").find_one(req=None, _id=doc["item"])
-            add_activity(
+            await add_activity(
                 "user:mention",
                 "",
                 resource=None,
@@ -76,15 +78,15 @@ def notify_mentioned_users(docs, origin, item=None):
                 comment_id=str(doc.get("_id")),
                 notify=mentioned_users,
             )
-            send_email_to_mentioned_users(doc, mentioned_users, origin)
+            await send_email_to_mentioned_users(doc, mentioned_users, origin)
 
 
-def notify_mentioned_desks(docs):
+async def notify_mentioned_desks(docs):
     for doc in docs:
         mentioned_desks = doc.get("mentioned_desks", {}).values()
         if len(mentioned_desks) > 0:
-            item = superdesk.get_resource_service("archive").find_one(req=None, _id=doc["item"])
-            add_activity(
+            item = await superdesk.get_resource_service("archive").find_one_async(req=None, _id=doc["item"])
+            await add_activity(
                 "desk:mention",
                 "",
                 resource=None,

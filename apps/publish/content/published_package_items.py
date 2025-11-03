@@ -8,20 +8,21 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
+from superdesk.resource_fields import ID_FIELD
 from apps.archive.common import ARCHIVE
 from superdesk import get_resource_service
 from superdesk.metadata.item import ITEM_TYPE, CONTENT_TYPE, PUBLISH_STATES, ITEM_STATE
 from superdesk.resource import Resource
 
 from apps.packages.package_service import PackageService, create_root_group, get_item_ref
-from eve.utils import config
 from superdesk.validation import ValidationError
 from superdesk.errors import SuperdeskApiError
-from superdesk.services import BaseService
+from superdesk.eve_async.service import AsyncBaseService
 from superdesk.metadata.packages import GROUPS, GROUP_ID, REFS, RESIDREF, ROOT_GROUP, ID_REF, PACKAGE_TYPE
-from flask_babel import _
+from quart_babel import gettext as _
 
 
+# TODO-ASYNC: Do we need this, I can't find reference to this resource (both back-end and front-end)
 class PublishedPackageItemsResource(Resource):
     schema = {
         "package_id": {"type": "string", "required": True},
@@ -36,13 +37,13 @@ class PublishedPackageItemsResource(Resource):
     privileges = {"POST": ARCHIVE}
 
 
-class PublishedPackageItemsService(BaseService):
+class PublishedPackageItemsService(AsyncBaseService):
     package_service = PackageService()
 
-    def create(self, docs, **kwargs):
+    async def create_async(self, docs, **kwargs):
         ids = []
         for doc in docs:
-            original = get_resource_service(ARCHIVE).find_one(req=None, _id=doc["package_id"])
+            original = await get_resource_service(ARCHIVE).find_one_async(req=None, _id=doc["package_id"])
             if not original or original[ITEM_TYPE] != CONTENT_TYPE.COMPOSITE:
                 raise SuperdeskApiError.badRequestError(_("Invalid package identifier"))
             if original[ITEM_STATE] not in PUBLISH_STATES:
@@ -50,33 +51,33 @@ class PublishedPackageItemsService(BaseService):
 
             items = {}
             for new_item in doc["new_items"]:
-                item = get_resource_service(ARCHIVE).find_one(req=None, _id=new_item["item_id"])
+                item = await get_resource_service(ARCHIVE).find_one_async(req=None, _id=new_item["item_id"])
                 if not item:
                     raise SuperdeskApiError.badRequestError(
                         _("Invalid item identifier  {item_id}").format(item_id=new_item["item_id"])
                     )
                 try:
-                    self.package_service.check_for_circular_reference(original, new_item["item_id"])
+                    await self.package_service.check_for_circular_reference_async(original, new_item["item_id"])
                 except ValidationError:
                     raise SuperdeskApiError.badRequestError(
                         _("Circular reference in item {item_id}").format(item_id=new_item["item_id"])
                     )
-                items[item[config.ID_FIELD]] = item
+                items[item[ID_FIELD]] = item
 
-            updates = {key: original[key] for key in [config.ID_FIELD, PACKAGE_TYPE, GROUPS] if key in original}
+            updates = {key: original[key] for key in [ID_FIELD, PACKAGE_TYPE, GROUPS] if key in original}
             create_root_group([updates])
             items_refs = []
             for new_item in doc["new_items"]:
                 items_refs.append(self._set_item_assoc(updates, new_item, items[new_item["item_id"]]))
-            get_resource_service(ARCHIVE).system_update(original[config.ID_FIELD], updates, original)
+            await get_resource_service(ARCHIVE).system_update_async(original[ID_FIELD], updates, original)
             for item_ref in items_refs:
-                self.package_service.update_link(updates, item_ref)
+                await self.package_service.update_link_async(updates, item_ref)
 
             items_published = [new_item[ITEM_STATE] in PUBLISH_STATES for new_item in items.values()]
             if any(items_published):
-                get_resource_service("archive_correct").patch(id=doc["package_id"], updates=updates)
+                await get_resource_service("archive_correct").patch_async(id=doc["package_id"], updates=updates)
 
-            ids.append(original[config.ID_FIELD])
+            ids.append(original[ID_FIELD])
         return ids
 
     def _set_item_assoc(self, package, new_item, item_doc):

@@ -1,6 +1,6 @@
-from flask import json
 from eve.utils import ParsedRequest
 
+from superdesk.core import json
 from superdesk import SearchProvider, register_search_provider, get_resource_service
 from superdesk.errors import SuperdeskApiError
 from apps.search_providers import allowed_search_providers
@@ -13,6 +13,7 @@ class TestSearchProvider(SearchProvider):
     def find(self, query):
         request = ParsedRequest()
         request.args = {"source": json.dumps(query), "repo": "archive,published"}
+        # TODO-ASYNC[search]: Use `get_async` when upgrading this module
         return get_resource_service("search").get(req=request, lookup=None)
 
     def fetch(self, guid):

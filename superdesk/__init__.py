@@ -12,16 +12,17 @@
 
 import eve
 import blinker
+import click
 import logging as logging_lib
 
-from typing import Any, Dict, NamedTuple, Optional
-from flask import abort, json, Blueprint, current_app
-from flask_babel.speaklater import LazyString
-from flask_script import Command as BaseCommand, Option
-from eve.utils import config  # noqa
+from typing import Any, Dict, List, NamedTuple, Optional
+from quart_babel.speaklater import LazyString
+
+# from flask_script import Command as BaseCommand, Option
 from eve.methods.common import document_link  # noqa
 from werkzeug.exceptions import HTTPException
 
+from .core import get_app_config, json
 from .eve_backend import EveBackend
 from .datalayer import SuperdeskDataLayer  # noqa
 from .services import BaseService as Service  # noqa
@@ -32,12 +33,13 @@ from .signals import *  # noqa
 from apps.common.models.base_model import BaseModel
 from apps.common.components.base_component import BaseComponent
 
-__version__ = "2.10.0"
+__version__ = "3.2.0-dev.0"
 
 API_NAME = "Superdesk API"
 SCHEMA_VERSION = 2
 DOMAIN = {}
 COMMANDS = {}
+COMMANDS_V2 = []
 JINJA_FILTERS = dict()
 app_components: Dict[str, BaseComponent] = dict()
 app_models: Dict[str, BaseModel] = dict()
@@ -55,35 +57,84 @@ class UserPreference(NamedTuple):
     category: Optional[LazyString] = None
 
 
-class Command(BaseCommand):
-    """Superdesk Command.
-
-    The Eve framework changes introduced with https://github.com/nicolaiarocci/eve/issues/213 make the commands fail.
-    Reason being the flask-script's run the commands using test_request_context() which is invalid.
-    That's the reason we are inheriting the Flask-Script's Command to overcome this issue.
+class Option(click.Option):
+    """
+    Basic Option class warpper of Click.Option that maintains compatibility with flask-script.
     """
 
-    def __call__(self, _app=None, *args, **kwargs):
+    def __init__(self, *param_decls, action=None, dest=None, choices=None, **attrs):
+        if action == "append":
+            attrs["multiple"] = True
+
+        elif action == "store_true":
+            attrs["is_flag"] = True
+
+        if dest:
+            param_decls = list(param_decls) + [f"--{dest.replace('_', '-')}"]
+
+        if choices:
+            attrs["type"] = click.Choice(choices)
+
         try:
-            with app.app_context():
-                res = self.run(*args, **kwargs)
-                logger.info("Command finished with: {}".format(res))
-                return 0
-        except Exception as ex:
-            logger.info("Uhoh, an exception occured while running the command...")
-            logger.exception(ex)
-            return 1
+            super().__init__(param_decls, **attrs)
+        except Exception:
+            pass
 
 
-def get_headers(self, environ=None):
+class Command(click.Command):
+    """
+    Basic Command wrapper class of Click.Command to maintain compatibility with previous flask-script
+    implementations
+
+    Attributes:
+        name (str): The name of the command.
+        option_list (list): A list of option instances.
+    """
+
+    name: str = ""
+    option_list: List[Option] = []
+
+    def __init__(self, *args, **kwargs):
+        # To avoid introducing too many breaking changes we need to set some
+        # default values with the previous implementation with flask-script
+        kwargs["params"] = kwargs.get("params", self.option_list)
+        kwargs["callback"] = kwargs.get("run", self.run)
+
+        # also to continue using the docstrings as help text
+        kwargs["help"] = kwargs.get("help", self.__doc__)
+
+        super().__init__(self.name, *args, **kwargs)
+
+    def invoke(self, ctx):
+        click.secho("DeprecationWarning: 'superdesk.Command' is deprecated. Use 'Click' library instead.", fg="yellow")
+        return super().invoke(ctx)
+
+    def run(self, *args, **kwargs):
+        """
+        Placeholder for the command's execution logic.
+
+        Must be overridden by subclasses.
+
+        Raises:
+            NotImplementedError: If not overridden by subclasses.
+        """
+        raise NotImplementedError("Commands must implement the run method")
+
+
+def register_command(command):
+    COMMANDS_V2.append(command)
+
+
+def get_headers(self, environ=None, scope=None):
     """Fix CORS for abort responses.
 
     todo(petr): put in in custom flask error handler instead
     """
+
     return [
         ("Content-Type", "text/html"),
-        ("Access-Control-Allow-Origin", current_app.config["CLIENT_URL"]),
-        ("Access-Control-Allow-Headers", ",".join(current_app.config["X_HEADERS"])),
+        ("Access-Control-Allow-Origin", get_app_config("CLIENT_URL")),
+        ("Access-Control-Allow-Headers", ",".join(get_app_config("X_HEADERS"))),
         ("Access-Control-Allow-Credentials", "true"),
         ("Access-Control-Allow-Methods", "*"),
     ]

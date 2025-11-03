@@ -10,9 +10,9 @@
 
 
 import os
-from superdesk import config
-from superdesk.tests import TestCase
 
+from superdesk.core import get_current_app
+from superdesk.tests import TestCase
 from superdesk.etree import etree
 from superdesk.io.feed_parsers.nitf import NITFFeedParser
 
@@ -20,15 +20,15 @@ from superdesk.io.feed_parsers.nitf import NITFFeedParser
 class NITFTestCase(TestCase):
     vocab = [{"_id": "genre", "items": [{"name": "Current"}]}]
 
-    def setUp(self):
-        with self.app.app_context():
-            self.app.data.insert("vocabularies", self.vocab)
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.app.data.insert("vocabularies", self.vocab)
         dirname = os.path.dirname(os.path.realpath(__file__))
         fixture = os.path.normpath(os.path.join(dirname, "../fixtures", self.filename))
         provider = {"name": "Test"}
         with open(fixture, "rb") as f:
             self.nitf = f.read()
-            self.item = NITFFeedParser().parse(etree.fromstring(self.nitf), provider)
+            self.item = await NITFFeedParser().parse(etree.fromstring(self.nitf), provider)
 
 
 class AAPTestCase(NITFTestCase):
@@ -232,14 +232,15 @@ class MappingTestCase(TestCase):
         },
     }
 
-    def setUp(self):
-        config.NITF_MAPPING = self.mapping
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        get_current_app().config["NITF_MAPPING"] = self.mapping
         dirname = os.path.dirname(os.path.realpath(__file__))
         fixture = os.path.normpath(os.path.join(dirname, "../fixtures", self.filename))
         provider = {"name": "Test"}
         with open(fixture, "rb") as f:
             self.nitf = f.read()
-            self.item = NITFFeedParser().parse(etree.fromstring(self.nitf), provider)
+            self.item = await NITFFeedParser().parse(etree.fromstring(self.nitf), provider)
 
     def test_update_and_hook(self):
         subjects = self.item.get("subject")
@@ -250,8 +251,9 @@ class MappingTestCase(TestCase):
         # and our key from subject_test need to be here too
         self.assertIn("TEST OK", subjects)
 
-    def tearDown(self):
-        del config.NITF_MAPPING
+    async def asyncTearDown(self):
+        get_current_app().config.pop("NITF_MAPPING", None)
+        await super().asyncTearDown()
 
 
 class HandleInvalidFieldsTestCase(NITFTestCase):

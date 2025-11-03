@@ -13,9 +13,11 @@ import pymongo
 import logging
 
 from typing import Dict, Any, List, Optional, Union
-from flask import current_app as app, json, g
-from eve.utils import ParsedRequest, config
+from eve.utils import ParsedRequest
 from eve.methods.common import resolve_document_etag
+
+from superdesk.resource_fields import ETAG
+from superdesk.flask import g
 from superdesk.errors import SuperdeskApiError
 from superdesk.utc import utcnow
 from superdesk.cache import cache
@@ -30,6 +32,7 @@ class BaseService:
     """
 
     datasource: Union[str, None]
+    is_async = False
 
     def __init__(self, datasource: Optional[str] = None, backend=None):
         self.backend = backend
@@ -132,6 +135,8 @@ class BaseService:
         if req is None:
             req = ParsedRequest()
         if not req.projection and projection:
+            from superdesk.core import json
+
             req.projection = json.dumps(projection)
         return self.backend.get_from_mongo(self.datasource, req=req, lookup=lookup)
 
@@ -139,8 +144,7 @@ class BaseService:
         return self.get_from_mongo(None, {}).sort("_id")
 
     def find_and_modify(self, query, update, **kwargs):
-        res = self.backend.find_and_modify(self.datasource, query=query, update=update, **kwargs)
-        return res
+        return self.backend.find_and_modify(self.datasource, filter=query, update=update, **kwargs)
 
     def get_all_batch(self, size=500, max_iterations=10000, lookup=None):
         """Gets all items using multiple queries.
@@ -166,12 +170,17 @@ class BaseService:
             logger.warning("Not enough iterations for resource %s", self.datasource)
 
     def _validator(self, skip_validation=False):
-        resource_def = app.config["DOMAIN"][self.datasource]
+        from superdesk.core import get_app_config, get_current_app
+
+        resource_def = get_app_config("DOMAIN")[self.datasource]
         schema = resource_def["schema"]
+
         return (
             None
             if skip_validation
-            else app.validator(schema, resource=self.datasource, allow_unknown=resource_def["allow_unknown"])
+            else get_current_app().validator(
+                schema, resource=self.datasource, allow_unknown=resource_def["allow_unknown"]
+            )
         )
 
     def _resolve_defaults(self, doc):
@@ -190,13 +199,15 @@ class BaseService:
         return ids
 
     def patch(self, id, updates):
+        from superdesk.core import get_app_config
+
         original = self.find_one(req=None, _id=id)
         updated = original.copy()
         self.on_update(updates, original)
         updated.update(updates)
-        if config.IF_MATCH:
+        if get_app_config("IF_MATCH"):
             resolve_document_etag(updated, self.datasource)
-            updates[config.ETAG] = updated[config.ETAG]
+            updates[ETAG] = updated[ETAG]
         res = self.update(id, updates, original)
         self.on_updated(updates, original)
         return res
@@ -220,7 +231,7 @@ class BaseService:
             return self.delete(lookup)
         return self.delete_docs(docs)
 
-    def is_authorized(self, **kwargs):
+    async def is_authorized(self, **kwargs):
         """Subclass should override if the resource handled by the service has intrinsic privileges.
 
         :param kwargs: should have properties which help in authorizing the request
@@ -271,6 +282,9 @@ class BaseService:
             "_error": {"code": 400, "_message": "Unable to update {}.".format(self.datasource)},
             "items": items,
         }
+
+    def count(self, lookup: dict | None = None) -> int:
+        return self.backend.count(self.datasource, lookup)
 
 
 class Service(BaseService):

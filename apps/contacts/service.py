@@ -8,20 +8,21 @@
 # AUTHORS and LICENSE files distributed with this source code, or
 # at https://www.sourcefabric.org/superdesk/license
 
-
-from flask import json
-from superdesk import get_resource_service
-from superdesk.services import Service
-from superdesk.notification import push_notification
-from superdesk.errors import SuperdeskApiError
-from eve.utils import config
-from eve.utils import ParsedRequest
-from flask_babel import _
 from copy import deepcopy
 
+from quart_babel import gettext as _
+from eve.utils import ParsedRequest
 
-class ContactsService(Service):
-    def get(self, req, lookup):
+from superdesk.core import json
+from superdesk.resource_fields import ID_FIELD
+from superdesk.notification import push_notification
+from superdesk.errors import SuperdeskApiError
+from superdesk import get_resource_service
+from superdesk.eve_async import AsyncBaseService
+
+
+class ContactsService(AsyncBaseService):
+    async def get_async(self, req, lookup):
         if req and not req.args.get("source") and req.args.get("q"):
             query = {
                 "bool": {
@@ -74,49 +75,49 @@ class ContactsService(Service):
         elif "all" not in req.args:
             lookup["is_active"] = True  # by default the response will have the inactive entries filtered out
 
-        return super().get(req, lookup)
+        return await super().get_async(req, lookup)
 
-    def on_create(self, docs):
+    async def on_create_async(self, docs):
         for doc in docs:
-            self._validate_assignable(doc)
+            await self._validate_assignable(doc)
 
-    def on_created(self, docs):
+    async def on_created_async(self, docs):
         """
         Send notification to clients that new contact(s) have been created
         :param docs:
         :return:
         """
-        push_notification("contacts:create", _id=[doc.get(config.ID_FIELD) for doc in docs])
+        push_notification("contacts:create", _id=[doc.get(ID_FIELD) for doc in docs])
 
-    def on_update(self, updates, original):
+    async def on_update_async(self, updates, original):
         item = deepcopy(original)
         item.update(updates)
-        self._validate_assignable(item)
+        await self._validate_assignable(item)
 
-    def on_updated(self, updates, original):
+    async def on_updated_async(self, updates, original):
         """
         Send notifification to clients that a contact has been updated
         :param updates:
         :param original:
         :return:
         """
-        push_notification("contacts:update", _id=[original.get(config.ID_FIELD)])
+        push_notification("contacts:update", _id=[original.get(ID_FIELD)])
 
-    def on_deleted(self, doc):
+    async def on_deleted_async(self, doc):
         """
         Send a notification to clients that a contact has been deleted
         :param doc:
         :return:
         """
-        push_notification("contacts:deleted", _id=[doc.get(config.ID_FIELD)])
+        push_notification("contacts:deleted", _id=[doc.get(ID_FIELD)])
 
-    def _validate_assignable(self, contact):
+    async def _validate_assignable(self, contact):
         """Validates a required email address if the contact_type has assignable flag turned on"""
 
         if not contact or not contact.get("contact_type"):
             return
 
-        types = get_resource_service("vocabularies").find_one(req=None, _id="contact_type")
+        types = await get_resource_service("vocabularies").find_one_async(req=None, _id="contact_type")
 
         if not types:
             return
@@ -136,8 +137,8 @@ class ContactsService(Service):
             )
 
 
-class OrganisationService(Service):
-    def get(self, req, lookup):
+class OrganisationService(AsyncBaseService):
+    async def get_async(self, req, lookup):
         """
         Search for organisation matching the passed q parameter
         :param req:
@@ -148,7 +149,7 @@ class OrganisationService(Service):
 
         q_str = "organisation:" + "* organisation:".join(req.args.get("q", "").split()) + "*"
         new_req.args = {"q": q_str, "default_operator": "AND", "projections": '{"organisation": 1}'}
-        ret = super().get(new_req, lookup)
+        ret = await super().get_async(new_req, lookup)
 
         # Remove any duplicate entries from the response
         orgs = []

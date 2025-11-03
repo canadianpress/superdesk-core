@@ -21,7 +21,7 @@ Feature: Content Filter Tests
     """
     When we post to "/content_filters/test"
     """
-    [{"return_matching": true, "filter_id": "#content_filters._id#"}]
+    {"return_matching": true, "filter_id": "#content_filters._id#"}
     """
     Then we get existing resource
     """
@@ -47,7 +47,7 @@ Feature: Content Filter Tests
     Given empty "content_filters"
     When we post to "/content_filters/test"
     """
-    [{"return_matching": true, "filter": {"content_filter": [{"expression" : {"fc" : ["#filter_conditions._id#"]}}]}}]
+    {"return_matching": true, "filter": {"content_filter": [{"expression" : {"fc" : ["#filter_conditions._id#"]}}]}}
     """
     Then we get existing resource
     """
@@ -77,7 +77,7 @@ Feature: Content Filter Tests
     """
     When we post to "/content_filters/test"
     """
-    [{"return_matching": false, "filter_id": "#content_filters._id#"}]
+    {"return_matching": false, "filter_id": "#content_filters._id#"}
     """
     Then we get existing resource
     """
@@ -103,7 +103,7 @@ Feature: Content Filter Tests
     Given empty "content_filters"
     When we post to "/content_filters/test"
     """
-    [{"return_matching": false, "filter": {"content_filter": [{"expression" : {"fc" : ["#filter_conditions._id#"]}}]}}]
+    {"return_matching": false, "filter": {"content_filter": [{"expression" : {"fc" : ["#filter_conditions._id#"]}}]}}
     """
     Then we get existing resource
     """
@@ -133,7 +133,7 @@ Feature: Content Filter Tests
     """
     When we post to "/content_filters/test"
     """
-    [{"filter_id": "#content_filters._id#", "article_id":"#archive._id#"}]
+    {"filter_id": "#content_filters._id#", "article_id":"#archive._id#"}
     """
     Then we get existing resource
     """
@@ -159,8 +159,8 @@ Feature: Content Filter Tests
     Given empty "content_filters"
     When we post to "/content_filters/test"
     """
-    [{"filter": {"content_filter": [{"expression" : {"fc" : ["#filter_conditions._id#"]}}]},
-      "article_id": "#archive._id#"}]
+    {"filter": {"content_filter": [{"expression" : {"fc" : ["#filter_conditions._id#"]}}]},
+      "article_id": "#archive._id#"}
     """
     Then we get existing resource
     """
@@ -174,7 +174,7 @@ Feature: Content Filter Tests
   Scenario: Test single article from ingest
     Given "ingest"
     """
-    [{"guid": 1, "_id": 1, "urgency": 1}]
+    [{"guid": "abcd123", "_id": "abcd123", "urgency": 1}]
     """
     Given empty "filter_conditions"
     When we post to "/filter_conditions" with success
@@ -189,7 +189,7 @@ Feature: Content Filter Tests
     """
     When we post to "/content_filters/test"
     """
-    [{"filter_id": "#content_filters._id#", "article_id":"1"}]
+    {"filter_id": "#content_filters._id#", "article_id":"abcd123"}
     """
     Then we get existing resource
     """
@@ -268,8 +268,8 @@ Feature: Content Filter Tests
     Given empty "content_filters"
     When we post to "/content_filters/test"
     """
-    [{"filter": {"content_filter": [{"expression" : {"fc" : ["#filter_conditions._id#"]}}]},
-      "article_id": "#archive._id#"}]
+    {"filter": {"content_filter": [{"expression" : {"fc" : ["#filter_conditions._id#"]}}]},
+      "article_id": "#archive._id#"}
     """
     Then we get existing resource
     """
@@ -295,8 +295,8 @@ Feature: Content Filter Tests
     Given empty "content_filters"
     When we post to "/content_filters/test"
     """
-    [{"filter": {"content_filter": [{"expression" : {"fc" : ["#filter_conditions._id#"]}}]},
-      "article_id": "#archive._id#"}]
+    {"filter": {"content_filter": [{"expression" : {"fc" : ["#filter_conditions._id#"]}}]},
+      "article_id": "#archive._id#"}
     """
     Then we get existing resource
     """
@@ -323,8 +323,8 @@ Feature: Content Filter Tests
     Given empty "content_filters"
     When we post to "/content_filters/test"
     """
-    [{"filter": {"content_filter": [{"expression" : {"fc" : ["#filter_conditions._id#"]}}]},
-      "article_id": "#archive._id#"}]
+    {"filter": {"content_filter": [{"expression" : {"fc" : ["#filter_conditions._id#"]}}]},
+      "article_id": "#archive._id#"}
     """
     Then we get existing resource
     """
@@ -367,7 +367,7 @@ Feature: Content Filter Tests
     """
     When we post to "/content_filters/test"
     """
-    [{
+    {
       "article_id": "#archive._id#",
       "filter": {
         "name": "test",
@@ -375,7 +375,7 @@ Feature: Content Filter Tests
           {"expression": {"fc": ["#filter_conditions._id#"]}}
         ]
       }
-    }]
+    }
     """
     Then we get existing resource
     """
@@ -391,7 +391,7 @@ Feature: Content Filter Tests
     """
     When we post to "/content_filters/test"
     """
-    [{
+    {
       "article_id": "#archive._id#",
       "filter": {
         "name": "test",
@@ -399,7 +399,7 @@ Feature: Content Filter Tests
           {"expression": {"fc": ["#filter_conditions._id#"]}}
         ]
       }
-    }]
+    }
     """
     Then we get existing resource
     """
